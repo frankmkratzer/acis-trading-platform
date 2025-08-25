@@ -1,4 +1,0 @@
-Docker Path: C:\Program Files\Docker\Docker\resources\bin
-Compose Command: docker-compose
-Project Path: C:\Users\frank\PycharmProjects\PythonProject\acis-trading-platform
-Generated: 08/24/2025 17:21:00
