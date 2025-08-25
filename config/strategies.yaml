@@ -1,0 +1,93 @@
+# Trading Strategy Configuration
+strategies:
+  value:
+    enabled: true
+    top_k: 20
+    min_market_cap: 1000000000  # $1B
+    max_market_cap: null
+    rebalance_frequency: monthly
+    factors:
+      earnings_yield: 0.25
+      fcf_yield: 0.35
+      book_to_market: 0.20
+      dividend_yield: 0.20
+    filters:
+      min_roe: 0.10
+      max_debt_to_equity: 2.0
+      positive_fcf: true
+    risk_limits:
+      max_position_size: 0.10
+      max_sector_weight: 0.30
+      min_positions: 15
+      max_positions: 30
+
+  growth:
+    enabled: true
+    top_k: 20
+    min_market_cap: 1000000000
+    rebalance_frequency: quarterly
+    factors:
+      revenue_growth: 0.30
+      earnings_growth: 0.40
+      fcf_growth: 0.30
+    filters:
+      min_revenue_growth: 0.10
+      min_gross_margin: 0.30
+      max_peg_ratio: 2.0
+    risk_limits:
+      max_position_size: 0.10
+      max_sector_weight: 0.35
+      min_positions: 15
+      max_positions: 25
+
+  momentum:
+    enabled: true
+    top_k: 20
+    min_market_cap: 1000000000
+    rebalance_frequency: monthly
+    factors:
+      return_1m: 0.20
+      return_3m: 0.30
+      return_6m: 0.30
+      return_12m: 0.20
+    filters:
+      min_volume: 1000000
+      positive_6m_return: true
+      max_volatility: 0.40
+    risk_limits:
+      max_position_size: 0.08
+      max_sector_weight: 0.25
+      min_positions: 20
+      max_positions: 30
+
+  dividend:
+    enabled: true
+    top_k: 20
+    min_market_cap: 5000000000  # $5B for dividend stocks
+    rebalance_frequency: quarterly
+    factors:
+      dividend_yield: 0.30
+      dividend_growth: 0.40
+      payout_ratio: 0.30
+    filters:
+      min_dividend_yield: 0.02
+      max_payout_ratio: 0.80
+      consecutive_years: 5
+      no_dividend_cuts: true
+    risk_limits:
+      max_position_size: 0.10
+      max_sector_weight: 0.30
+      min_positions: 15
+      max_positions: 25
+
+# Global Settings
+global:
+  max_portfolio_leverage: 1.0
+  cash_buffer: 0.02  # Keep 2% cash
+  rebalance_threshold: 0.05  # Rebalance if position drifts 5%
+  tax_loss_harvesting: true
+  max_daily_trades: 50
+  trading_hours:
+    start: "09:30"
+    end: "16:00"
+    timezone: "America/New_York"
