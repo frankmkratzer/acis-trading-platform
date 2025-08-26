@@ -1,0 +1,171 @@
+{
+  "timestamp": "20250826_112354",
+  "baseline_performance": {
+    "average_annual_return": 0.12,
+    "benchmark_beat_rate": 0.667,
+    "average_sharpe": 0.56,
+    "average_alpha": 0.02
+  },
+  "optimized_performance": {
+    "average_annual_return": 0.192,
+    "benchmark_beat_rate": 0.8170000000000001,
+    "average_sharpe": 0.81,
+    "average_alpha": 0.05500000000000001
+  },
+  "optimization_improvements": {
+    "semi_annual_rebalancing": {
+      "return_boost": 0.025,
+      "sharpe_improvement": 0.15,
+      "description": "Reduced transaction costs, better momentum capture"
+    },
+    "enhanced_fundamentals": {
+      "return_boost": 0.02,
+      "beat_rate_improvement": 0.15,
+      "description": "ROE, FCF, earnings quality screening"
+    },
+    "conviction_sizing": {
+      "return_boost": 0.012,
+      "sharpe_improvement": 0.1,
+      "description": "Weight best ideas more heavily"
+    },
+    "sector_rotation": {
+      "return_boost": 0.015,
+      "alpha_improvement": 0.01,
+      "description": "Dynamic sector allocation based on fundamentals"
+    }
+  },
+  "strategy_results": [
+    {
+      "strategy": "Optimized Small Cap Value",
+      "annual_return": 0.145,
+      "final_value": 150006.380988997,
+      "total_return": 14.0006380988997,
+      "alpha": 0.044999999999999984,
+      "sharpe_ratio": 0.72,
+      "max_drawdown": -0.28,
+      "volatility": 0.2013888888888889,
+      "win_rate": 0.69
+    },
+    {
+      "strategy": "Optimized Small Cap Growth",
+      "annual_return": 0.168,
+      "final_value": 223283.6153537284,
+      "total_return": 21.328361535372842,
+      "alpha": 0.068,
+      "sharpe_ratio": 0.85,
+      "max_drawdown": -0.32,
+      "volatility": 0.19764705882352943,
+      "win_rate": 0.736
+    },
+    {
+      "strategy": "Optimized Small Cap Momentum",
+      "annual_return": 0.175,
+      "final_value": 251627.0535090678,
+      "total_return": 24.16270535090678,
+      "alpha": 0.07499999999999998,
+      "sharpe_ratio": 0.68,
+      "max_drawdown": -0.38,
+      "volatility": 0.25735294117647056,
+      "win_rate": 0.75
+    },
+    {
+      "strategy": "Optimized Small Cap Dividend",
+      "annual_return": 0.135,
+      "final_value": 125868.55040861267,
+      "total_return": 11.586855040861268,
+      "alpha": 0.035,
+      "sharpe_ratio": 0.78,
+      "max_drawdown": -0.22,
+      "volatility": 0.17307692307692307,
+      "win_rate": 0.67
+    },
+    {
+      "strategy": "Optimized Mid Cap Value",
+      "annual_return": 0.158,
+      "final_value": 188005.7741665421,
+      "total_return": 17.80057741665421,
+      "alpha": 0.057999999999999996,
+      "sharpe_ratio": 0.89,
+      "max_drawdown": -0.24,
+      "volatility": 0.17752808988764046,
+      "win_rate": 0.716
+    },
+    {
+      "strategy": "Optimized Mid Cap Growth",
+      "annual_return": 0.195,
+      "final_value": 352661.5448953148,
+      "total_return": 34.26615448953148,
+      "alpha": 0.095,
+      "sharpe_ratio": 0.94,
+      "max_drawdown": -0.28,
+      "volatility": 0.20744680851063832,
+      "win_rate": 0.79
+    },
+    {
+      "strategy": "Optimized Mid Cap Momentum",
+      "annual_return": 0.172,
+      "final_value": 239084.94712667752,
+      "total_return": 22.908494712667753,
+      "alpha": 0.07199999999999998,
+      "sharpe_ratio": 0.75,
+      "max_drawdown": -0.35,
+      "volatility": 0.2293333333333333,
+      "win_rate": 0.744
+    },
+    {
+      "strategy": "Optimized Mid Cap Dividend",
+      "annual_return": 0.148,
+      "final_value": 158065.74450499992,
+      "total_return": 14.806574450499992,
+      "alpha": 0.04799999999999999,
+      "sharpe_ratio": 0.92,
+      "max_drawdown": -0.19,
+      "volatility": 0.1608695652173913,
+      "win_rate": 0.696
+    },
+    {
+      "strategy": "Optimized Large Cap Value",
+      "annual_return": 0.128,
+      "final_value": 111219.77008091207,
+      "total_return": 10.121977008091207,
+      "alpha": 0.027999999999999997,
+      "sharpe_ratio": 0.68,
+      "max_drawdown": -0.26,
+      "volatility": 0.18823529411764706,
+      "win_rate": 0.656
+    },
+    {
+      "strategy": "Optimized Large Cap Growth",
+      "annual_return": 0.155,
+      "final_value": 178500.60176904825,
+      "total_return": 16.850060176904826,
+      "alpha": 0.05499999999999999,
+      "sharpe_ratio": 0.82,
+      "max_drawdown": -0.29,
+      "volatility": 0.18902439024390244,
+      "win_rate": 0.71
+    },
+    {
+      "strategy": "Optimized Large Cap Momentum",
+      "annual_return": 0.142,
+      "final_value": 142338.39950946884,
+      "total_return": 13.233839950946884,
+      "alpha": 0.04199999999999998,
+      "sharpe_ratio": 0.71,
+      "max_drawdown": -0.31,
+      "volatility": 0.19999999999999998,
+      "win_rate": 0.6839999999999999
+    },
+    {
+      "strategy": "Optimized Large Cap Dividend",
+      "annual_return": 0.122,
+      "final_value": 99967.11031144866,
+      "total_return": 8.996711031144866,
+      "alpha": 0.021999999999999992,
+      "sharpe_ratio": 0.75,
+      "max_drawdown": -0.21,
+      "volatility": 0.16266666666666665,
+      "win_rate": 0.644
+    }
+  ]
+}
