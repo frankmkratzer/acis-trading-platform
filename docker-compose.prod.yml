@@ -1,0 +1,216 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: acis_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: acis_trading
+      POSTGRES_USER: acis_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acis_user -d acis_trading"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - acis_network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: acis_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - acis_network
+
+  # Admin Web Application
+  admin_app:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    container_name: acis_admin
+    restart: unless-stopped
+    environment:
+      - FLASK_ENV=production
+      - POSTGRES_URL=postgresql://acis_user:${POSTGRES_PASSWORD}@postgres:5432/acis_trading
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY}
+      - ADMIN_PORT=5001
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - ALERT_EMAIL=${ALERT_EMAIL}
+      - SCHWAB_CLIENT_ID=${SCHWAB_CLIENT_ID}
+      - SCHWAB_CLIENT_SECRET=${SCHWAB_CLIENT_SECRET}
+      - SCHWAB_REDIRECT_URI=${SCHWAB_REDIRECT_URI}
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ALPACA_BASE_URL=${ALPACA_BASE_URL}
+    ports:
+      - "5001:5001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./backups:/app/backups
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - acis_network
+
+  # System Monitoring Service
+  monitoring:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring
+    container_name: acis_monitoring
+    restart: unless-stopped
+    environment:
+      - POSTGRES_URL=postgresql://acis_user:${POSTGRES_PASSWORD}@postgres:5432/acis_trading
+      - REDIS_URL=redis://redis:6379
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - ALERT_EMAIL=${ALERT_EMAIL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - acis_network
+
+  # Trading System Service
+  trading_system:
+    build:
+      context: .
+      dockerfile: Dockerfile.trading
+    container_name: acis_trading
+    restart: unless-stopped
+    environment:
+      - POSTGRES_URL=postgresql://acis_user:${POSTGRES_PASSWORD}@postgres:5432/acis_trading
+      - REDIS_URL=redis://redis:6379
+      - SCHWAB_CLIENT_ID=${SCHWAB_CLIENT_ID}
+      - SCHWAB_CLIENT_SECRET=${SCHWAB_CLIENT_SECRET}
+      - SCHWAB_REDIRECT_URI=${SCHWAB_REDIRECT_URI}
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ALPACA_BASE_URL=${ALPACA_BASE_URL}
+      - IB_GATEWAY_HOST=${IB_GATEWAY_HOST:-127.0.0.1}
+      - IB_GATEWAY_PORT=${IB_GATEWAY_PORT:-7497}
+      - IB_CLIENT_ID=${IB_CLIENT_ID:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - acis_network
+
+  # Client Dashboard Service
+  client_dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: acis_client_dashboard
+    restart: unless-stopped
+    environment:
+      - POSTGRES_URL=postgresql://acis_user:${POSTGRES_PASSWORD}@postgres:5432/acis_trading
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${CLIENT_SECRET_KEY}
+      - CLIENT_PORT=5002
+    ports:
+      - "5002:5002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - acis_network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: acis_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - admin_app
+      - client_dashboard
+    networks:
+      - acis_network
+
+  # Backup Service
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    container_name: acis_backup
+    restart: unless-stopped
+    environment:
+      - POSTGRES_URL=postgresql://acis_user:${POSTGRES_PASSWORD}@postgres:5432/acis_trading
+      - BACKUP_SCHEDULE=${BACKUP_SCHEDULE:-0 2 * * *}
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-30}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backups:/app/backups
+      - postgres_data:/var/lib/postgresql/data:ro
+    networks:
+      - acis_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  acis_network:
+    driver: bridge
