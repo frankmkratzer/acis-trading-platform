@@ -257,20 +257,42 @@ def parse_reports(symbol, income, balance, cash):
             "grossProfit": to_num(i.get("grossProfit"), as_int=True),
             "netIncome": to_num(i.get("netIncome"), as_int=True),
             "eps": to_num(eps_raw, as_int=False),
-            # Balance
+            # Balance Sheet
             "totalAssets": to_num(b.get("totalAssets"), as_int=True),
             "totalLiabilities": to_num(b.get("totalLiabilities"), as_int=True),
             "totalShareholderEquity": to_num(b.get("totalShareholderEquity"), as_int=True),
+            
+            # Enhanced Funnel Analysis Fields
+            "cashAndCashEquivalentsAtCarryingValue": to_num(b.get("cashAndCashEquivalentsAtCarryingValue"), as_int=True),
+            "cashAndShortTermInvestments": to_num(b.get("cashAndShortTermInvestments"), as_int=True),
+            "shortTermInvestments": to_num(b.get("shortTermInvestments"), as_int=True),
+            "commonStockSharesOutstanding": to_num(b.get("commonStockSharesOutstanding"), as_int=True),
+            "currentNetReceivables": to_num(b.get("currentNetReceivables"), as_int=True),
+            "inventory": to_num(b.get("inventory"), as_int=True),
+            "currentAccountsPayable": to_num(b.get("currentAccountsPayable"), as_int=True),
+            "longTermDebt": to_num(b.get("longTermDebt"), as_int=True),
+            "shortTermDebt": to_num(b.get("shortTermDebt"), as_int=True),
+            "goodwill": to_num(b.get("goodwill"), as_int=True),
+            "intangibleAssets": to_num(b.get("intangibleAssets"), as_int=True),
+            
             # Cash Flow
             "operatingCashflow": to_num(c.get("operatingCashflow"), as_int=True),
             "capitalExpenditures": to_num(c.get("capitalExpenditures"), as_int=True),
             "dividendPayout": to_num(c.get("dividendPayout"), as_int=True),
         }
 
-        # Derived FCF
+        # Derived calculations
         ocf, capex = row["operatingCashflow"], row["capitalExpenditures"]
+        shares = row["commonStockSharesOutstanding"]
+        
+        # Free Cash Flow
         row["free_cf"] = (ocf + capex) if (ocf is not None and capex is not None) else None
-        row["cash_flow_per_share"] = None
+        
+        # Cash Flow Per Share
+        if ocf is not None and shares is not None and shares > 0:
+            row["cash_flow_per_share"] = float(ocf) / float(shares)
+        else:
+            row["cash_flow_per_share"] = None
         row["fetched_at"] = datetime.now(timezone.utc)
         rows.append(row)
 
@@ -279,6 +301,9 @@ def parse_reports(symbol, income, balance, cash):
             "symbol","fiscal_date","source","run_id",
             "totalrevenue","grossprofit","netincome","eps",
             "totalassets","totalliabilities","totalshareholderequity",
+            "cashandcashequivalentsatcarryingvalue","cashandshorttermInvestments","shorttermInvestments",
+            "commonstocksharesoutstanding","currentnetreceivables","inventory","currentaccountspayable",
+            "longtermdebt","shorttermdebt","goodwill","intangibleassets",
             "operatingcashflow","capitalexpenditures","dividendpayout",
             "free_cf","cash_flow_per_share","fetched_at"
         ])
@@ -293,6 +318,9 @@ def parse_reports(symbol, income, balance, cash):
 INT_COLS = [
     "totalrevenue","grossprofit","netincome",
     "totalassets","totalliabilities","totalshareholderequity",
+    "cashandcashequivalentsatcarryingvalue","cashandshorttermInvestments","shorttermInvestments",
+    "commonstocksharesoutstanding","currentnetreceivables","inventory","currentaccountspayable",
+    "longtermdebt","shorttermdebt","goodwill","intangibleassets",
     "operatingcashflow","capitalexpenditures","dividendpayout","free_cf",
 ]
 FLOAT_COLS = ["eps", "cash_flow_per_share"]  # fine to leave as-is

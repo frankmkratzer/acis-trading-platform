@@ -276,6 +276,20 @@ CREATE TABLE IF NOT EXISTS fundamentals_annual (
     dividendPayout BIGINT,
     free_cf BIGINT,
     cash_flow_per_share NUMERIC,
+    
+    -- Enhanced Funnel Analysis Fields
+    cashAndCashEquivalentsAtCarryingValue BIGINT,
+    cashAndShortTermInvestments BIGINT,
+    shortTermInvestments BIGINT,
+    commonStockSharesOutstanding BIGINT,
+    currentNetReceivables BIGINT,
+    inventory BIGINT,
+    currentAccountsPayable BIGINT,
+    longTermDebt BIGINT,
+    shortTermDebt BIGINT,
+    goodwill BIGINT,
+    intangibleAssets BIGINT,
+    
     fetched_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (symbol, fiscal_date)
 );
@@ -300,6 +314,20 @@ CREATE TABLE IF NOT EXISTS fundamentals_quarterly (
     dividendPayout BIGINT,
     free_cf BIGINT,
     cash_flow_per_share NUMERIC,
+    
+    -- Enhanced Funnel Analysis Fields
+    cashAndCashEquivalentsAtCarryingValue BIGINT,
+    cashAndShortTermInvestments BIGINT,
+    shortTermInvestments BIGINT,
+    commonStockSharesOutstanding BIGINT,
+    currentNetReceivables BIGINT,
+    inventory BIGINT,
+    currentAccountsPayable BIGINT,
+    longTermDebt BIGINT,
+    shortTermDebt BIGINT,
+    goodwill BIGINT,
+    intangibleAssets BIGINT,
+    
     fetched_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (symbol, fiscal_date)
 );

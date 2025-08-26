@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  # Main ACIS Trading Platform Application
+  acis-trading:
+    build: .
+    container_name: acis-trading-platform
+    restart: unless-stopped
+    environment:
+      - POSTGRES_URL=${POSTGRES_URL}
+      - ENVIRONMENT=production
+      - TZ=America/New_York
+    volumes:
+      - ./:/opt/acis-trading
+      - logs:/var/log/acis-trading
+      - data:/opt/acis-trading/data
+    depends_on:
+      - postgres
+    networks:
+      - acis-network
+    command: python smart_scheduler.py
+
+  # PostgreSQL Database (if not using managed database)
+  postgres:
+    image: postgres:15-alpine
+    container_name: acis-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=acis_trading
+      - POSTGRES_USER=acis_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - acis-network
+    ports:
+      - "5432:5432"
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: acis-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - acis-network
+    command: redis-server --appendonly yes
+
+  # Monitoring with Prometheus (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: acis-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - acis-network
+    ports:
+      - "9090:9090"
+    profiles:
+      - monitoring
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: acis-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    networks:
+      - acis-network
+    ports:
+      - "3000:3000"
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  logs:
+    driver: local
+  data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  acis-network:
+    driver: bridge

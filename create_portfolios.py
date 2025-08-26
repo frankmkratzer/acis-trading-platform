@@ -23,7 +23,7 @@ def create_portfolios():
         print("Creating Value Portfolio...")
         try:
             conn.execute(text("""
-                INSERT INTO ai_value_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type)
+                INSERT INTO ai_value_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type, fetched_at)
                 SELECT 
                     symbol,
                     CURRENT_DATE,
@@ -32,17 +32,19 @@ def create_portfolios():
                     'Value Pick',
                     ROW_NUMBER() OVER (ORDER BY score DESC),
                     'v2.0',
-                    'value'
+                    'value',
+                    CURRENT_TIMESTAMP
                 FROM ai_value_scores
                 WHERE score IS NOT NULL
                 ORDER BY score DESC
-                LIMIT 30
+                LIMIT 10
                 ON CONFLICT (symbol, as_of_date, score_type) DO UPDATE SET
                     score = EXCLUDED.score,
-                    rank = EXCLUDED.rank
+                    rank = EXCLUDED.rank,
+                    fetched_at = CURRENT_TIMESTAMP
             """))
             conn.commit()
-            print("  Value Portfolio: SUCCESS (30 stocks)")
+            print("  Value Portfolio: SUCCESS (10 stocks)")
             portfolios_created += 1
         except Exception as e:
             print(f"  Value Portfolio: FAILED - {e}")
@@ -51,7 +53,7 @@ def create_portfolios():
         print("Creating Growth Portfolio...")
         try:
             conn.execute(text("""
-                INSERT INTO ai_growth_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type)
+                INSERT INTO ai_growth_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type, fetched_at)
                 SELECT 
                     symbol,
                     CURRENT_DATE,
@@ -60,17 +62,19 @@ def create_portfolios():
                     'Growth Pick',
                     ROW_NUMBER() OVER (ORDER BY score DESC),
                     'v2.0',
-                    'growth'
+                    'growth',
+                    CURRENT_TIMESTAMP
                 FROM ai_growth_scores
                 WHERE score IS NOT NULL
                 ORDER BY score DESC
-                LIMIT 30
+                LIMIT 10
                 ON CONFLICT (symbol, as_of_date, score_type) DO UPDATE SET
                     score = EXCLUDED.score,
-                    rank = EXCLUDED.rank
+                    rank = EXCLUDED.rank,
+                    fetched_at = CURRENT_TIMESTAMP
             """))
             conn.commit()
-            print("  Growth Portfolio: SUCCESS (30 stocks)")
+            print("  Growth Portfolio: SUCCESS (10 stocks)")
             portfolios_created += 1
         except Exception as e:
             print(f"  Growth Portfolio: FAILED - {e}")
@@ -79,7 +83,7 @@ def create_portfolios():
         print("Creating Momentum Portfolio...")
         try:
             conn.execute(text("""
-                INSERT INTO ai_momentum_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type)
+                INSERT INTO ai_momentum_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type, fetched_at)
                 SELECT 
                     symbol,
                     CURRENT_DATE,
@@ -88,23 +92,55 @@ def create_portfolios():
                     'Momentum Pick',
                     ROW_NUMBER() OVER (ORDER BY score DESC),
                     'v2.0',
-                    'momentum'
+                    'momentum',
+                    CURRENT_TIMESTAMP
                 FROM ai_momentum_scores
                 WHERE score IS NOT NULL
                 ORDER BY score DESC
-                LIMIT 30
+                LIMIT 10
                 ON CONFLICT (symbol, as_of_date, score_type) DO UPDATE SET
                     score = EXCLUDED.score,
-                    rank = EXCLUDED.rank
+                    rank = EXCLUDED.rank,
+                    fetched_at = CURRENT_TIMESTAMP
             """))
             conn.commit()
-            print("  Momentum Portfolio: SUCCESS (30 stocks)")
+            print("  Momentum Portfolio: SUCCESS (10 stocks)")
             portfolios_created += 1
         except Exception as e:
             print(f"  Momentum Portfolio: FAILED - {e}")
         
+        # 4. DIVIDEND PORTFOLIO
+        print("Creating Dividend Portfolio...")
+        try:
+            conn.execute(text("""
+                INSERT INTO ai_dividend_portfolio (symbol, as_of_date, score, percentile, score_label, rank, model_version, score_type, fetched_at)
+                SELECT 
+                    symbol,
+                    CURRENT_DATE,
+                    score,
+                    percentile,
+                    'Dividend Pick',
+                    ROW_NUMBER() OVER (ORDER BY score DESC),
+                    'v2.0',
+                    'dividend',
+                    CURRENT_TIMESTAMP
+                FROM ai_dividend_scores
+                WHERE score IS NOT NULL
+                ORDER BY score DESC
+                LIMIT 10
+                ON CONFLICT (symbol, as_of_date, score_type) DO UPDATE SET
+                    score = EXCLUDED.score,
+                    rank = EXCLUDED.rank,
+                    fetched_at = CURRENT_TIMESTAMP
+            """))
+            conn.commit()
+            print("  Dividend Portfolio: SUCCESS (10 stocks)")
+            portfolios_created += 1
+        except Exception as e:
+            print(f"  Dividend Portfolio: FAILED - {e}")
+        
         print()
-        print(f"PORTFOLIOS CREATED: {portfolios_created}/3")
+        print(f"PORTFOLIOS CREATED: {portfolios_created}/4")
         
         # Verify and show results
         print("\nPortfolio Contents:")
@@ -112,7 +148,8 @@ def create_portfolios():
         portfolios = [
             ('ai_value_portfolio', 'VALUE'),
             ('ai_growth_portfolio', 'GROWTH'),
-            ('ai_momentum_portfolio', 'MOMENTUM')
+            ('ai_momentum_portfolio', 'MOMENTUM'),
+            ('ai_dividend_portfolio', 'DIVIDEND')
         ]
         
         total_picks = 0
@@ -144,7 +181,7 @@ def create_portfolios():
         
         print(f"\nTOTAL PORTFOLIO SELECTIONS: {total_picks}")
         
-        if total_picks >= 60:  # 3 portfolios x 20+ stocks each
+        if total_picks >= 40:  # 4 portfolios x 10 stocks each
             print("\nSUCCESS: Your trading system is now FULLY OPERATIONAL!")
             print("\nReady for:")
             print("  - Paper trading")
