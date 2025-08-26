@@ -6,7 +6,10 @@
 # File: regime_detection.py
 # Purpose: Market regime detection and strategy adaptation
 """
-
+from hmmlearn import hmm
+import pandas as pd
+import numpy as np
+from typing import Dict, Tuple
 
 class MarketRegimeDetector:
     """Detect and adapt to different market regimes"""
@@ -19,7 +22,7 @@ class MarketRegimeDetector:
     def detect_regime_hmm(self, returns: pd.Series, n_regimes: int = 3) -> np.array:
         """Detect regimes using Hidden Markov Model"""
 
-        from hmmlearn import hmm
+
 
         # Prepare data
         X = returns.values.reshape(-1, 1)

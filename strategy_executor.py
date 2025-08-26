@@ -1,11 +1,107 @@
-# =====================================
-# 4. LIVE TRADING STRATEGY EXECUTOR
-# =====================================
-"""
 #!/usr/bin/env python3
 # File: strategy_executor.py
 # Purpose: Execute strategies in live trading with real-time monitoring
-"""
+
+import logging
+import time
+import threading
+from datetime import datetime
+from typing import Dict, List, Optional
+import pandas as pd
+import numpy as np
+from enum import Enum
+import dash
+from dash import dcc, html, dash_table
+from dash.dependencies import Input, Output
+import plotly.graph_objs as go
+import plotly.express as px
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+# Define required enums and classes
+class OrderSide(Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+class OrderType(Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+    STOP = "STOP"
+    STOP_LIMIT = "STOP_LIMIT"
+
+class OrderStatus(Enum):
+    PENDING = "PENDING"
+    SUBMITTED = "SUBMITTED"
+    PARTIAL = "PARTIAL"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+
+class Position:
+    """Position class placeholder"""
+    def __init__(self, symbol: str, quantity: int, avg_cost: float):
+        self.symbol = symbol
+        self.quantity = quantity
+        self.avg_cost = avg_cost
+        self.current_price = avg_cost
+        self.market_value = quantity * avg_cost
+        self.unrealized_pnl = 0
+        self.realized_pnl = 0
+
+class Order:
+    """Order class placeholder"""
+    def __init__(self, order_id: str, symbol: str, side: OrderSide, 
+                 quantity: int, order_type: OrderType, limit_price: float = None,
+                 time_in_force: str = 'day'):
+        self.order_id = order_id
+        self.symbol = symbol
+        self.side = side
+        self.quantity = quantity
+        self.order_type = order_type
+        self.limit_price = limit_price
+        self.time_in_force = time_in_force
+        self.status = OrderStatus.PENDING
+        self.filled_quantity = 0
+        self.submitted_at = None
+
+class OrderManagementSystem:
+    """OMS placeholder"""
+    def __init__(self, broker):
+        self.broker = broker
+        self.orders = {}
+        self.daily_pnl = 0
+        self.order_count = 0
+    
+    def start(self):
+        return True
+    
+    def stop(self):
+        pass
+    
+    def submit_order(self, order: Order):
+        self.orders[order.order_id] = order
+        self.order_count += 1
+        return order.order_id
+
+class AdvancedRiskManager:
+    """Risk manager placeholder - import from advanced_risk_manager.py"""
+    pass
+
+class AlpacaBroker:
+    """Broker placeholder"""
+    def get_positions(self):
+        return []
+    
+    def get_account_info(self):
+        return {
+            'portfolio_value': 100000,
+            'cash': 50000,
+            'buying_power': 50000
+        }
+    
+    def get_market_data(self, symbol: str):
+        return {'last': 100.0}
 
 
 class StrategyExecutor:
@@ -192,17 +288,7 @@ class StrategyExecutor:
 # =====================================
 # 5. REAL-TIME MONITORING DASHBOARD
 # =====================================
-"""
-#!/usr/bin/env python3
-# File: realtime_dashboard.py
-# Purpose: Real-time monitoring dashboard for live trading
-"""
 
-import dash
-from dash import dcc, html, dash_table
-from dash.dependencies import Input, Output
-import plotly.graph_objs as go
-import plotly.express as px
 
 
 class TradingDashboard:

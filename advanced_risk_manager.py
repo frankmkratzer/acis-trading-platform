@@ -9,11 +9,13 @@
 
 import pandas as pd
 import numpy as np
+from typing import Dict
 from scipy import stats
 from scipy.optimize import minimize
 from sklearn.covariance import LedoitWolf
 from sklearn.mixture import GaussianMixture
 import warnings
+from typing import Dict
 
 warnings.filterwarnings('ignore')
 

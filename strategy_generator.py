@@ -1,11 +1,16 @@
-# =====================================
-# 5. AUTOMATED STRATEGY GENERATOR
-# =====================================
-"""
 #!/usr/bin/env python3
 # File: strategy_generator.py
 # Purpose: Automatically generate and test trading strategies
-"""
+
+import logging
+import random
+import copy
+from typing import Dict, List, Optional
+import pandas as pd
+import numpy as np
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 class AutomatedStrategyGenerator:
@@ -18,8 +23,6 @@ class AutomatedStrategyGenerator:
 
     def generate_random_strategy(self) -> Dict:
         """Generate a random strategy configuration"""
-
-        import random
 
         strategy = {
             'name': f'strategy_{random.randint(1000, 9999)}',
@@ -153,8 +156,6 @@ class AutomatedStrategyGenerator:
     def crossover(self, parent1: Dict, parent2: Dict) -> Dict:
         """Crossover two strategies to create offspring"""
 
-        import random
-
         child = {}
 
         for key in parent1.keys():
@@ -167,9 +168,6 @@ class AutomatedStrategyGenerator:
 
     def mutate(self, strategy: Dict) -> Dict:
         """Mutate a strategy"""
-
-        import random
-        import copy
 
         mutated = copy.deepcopy(strategy)
 

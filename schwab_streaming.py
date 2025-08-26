@@ -1,11 +1,17 @@
-# =====================================
-# 2. SCHWAB STREAMING CLIENT
-# =====================================
-"""
 #!/usr/bin/env python3
 # File: schwab_streaming.py
 # Purpose: Real-time streaming data from Schwab
-"""
+
+from schwab_broker import SchwabBroker, SchwabOrderType, SchwabOrderInstruction, SchwabOrderDuration, SchwabAuthManager
+import websocket
+import logging
+import json
+import threading
+import time
+from typing import List, Dict, Optional
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 class SchwabStreamingClient:

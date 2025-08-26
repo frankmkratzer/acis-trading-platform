@@ -945,7 +945,6 @@ class PipelineConfig:
         ScriptConfig("setup_schema.py", 300, True, (), priority="critical"),  # Increased to 5 min
         ScriptConfig("fetch_symbol_metadata.py", 900, True, ("setup_schema.py",),  # 15 min
                      cache_key="symbols", priority="high"),
-        ScriptConfig("populate_stock_metadata.py", 300, False, ("fetch_symbol_metadata.py",)),  # 5 min
         ScriptConfig("fetch_sp500_history.py", 300, False, ("setup_schema.py",),  # 5 min
                      cache_key="sp500"),
         ScriptConfig("fetch_prices.py", 2400, True, ("fetch_symbol_metadata.py",),  # 40 min

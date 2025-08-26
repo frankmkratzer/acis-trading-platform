@@ -6,7 +6,10 @@
 # File: multi_factor_optimizer.py
 # Purpose: Advanced multi-factor portfolio optimization
 """
-
+import pandas as pd
+import numpy as np
+from typing import Dict
+from scipy.optimize import minimize
 
 class MultiFactorOptimizer:
     """Multi-factor portfolio optimization with factor timing"""
