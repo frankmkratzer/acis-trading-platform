@@ -16,12 +16,19 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from reliability_manager import (
+    retry_with_backoff, log_errors, validate_price_data, 
+    with_circuit_breaker, log_script_health, get_memory_usage
+)
 
 # ─── Config ─────────────────────────────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 POSTGRES_URL = os.getenv("POSTGRES_URL")
-engine = create_engine(POSTGRES_URL)
+
+# Use optimized connection pooling
+from db_connection_manager import get_db_engine
+engine = get_db_engine(POSTGRES_URL)
 
 AV_URL = "https://www.alphavantage.co/query"
 
@@ -103,50 +110,22 @@ def rate_limited_get(url, params, timeout=20):
 
 # ─── DB helpers ─────────────────────────────────────────────────
 def get_latest_trade_date(symbol):
-    query = text("SELECT MAX(trade_date) FROM stock_eod_daily WHERE symbol = :symbol")
+    query = text("SELECT MAX(date) FROM stock_prices WHERE symbol = :symbol")
     with engine.connect() as conn:
         return conn.execute(query, {"symbol": symbol}).scalar()
 
 def upsert_prices(df: pd.DataFrame):
     if df.empty:
         return
-    # Ensure correct dtypes early
-    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-    with engine.begin() as conn:
-        temp_table = "temp_eod_prices"
-        df.to_sql(temp_table, conn, if_exists="replace", index=False, method="multi", chunksize=1000)
-        conn.execute(text(f"""
-            INSERT INTO stock_eod_daily (
-                symbol, trade_date, open, high, low, close, adjusted_close,
-                volume, dividend_amount, split_coefficient, fetched_at
-            )
-            SELECT
-                symbol,
-                trade_date::DATE,
-                open,
-                high,
-                low,
-                close,
-                adjusted_close,
-                volume,
-                dividend_amount,
-                split_coefficient,
-                fetched_at
-            FROM  {temp_table}
-            ON CONFLICT (symbol, trade_date) DO UPDATE SET
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                adjusted_close = EXCLUDED.adjusted_close,
-                volume = EXCLUDED.volume,
-                dividend_amount = EXCLUDED.dividend_amount,
-                split_coefficient = EXCLUDED.split_coefficient,
-                fetched_at = EXCLUDED.fetched_at;
-        """))
-        conn.execute(text(f"DROP TABLE {temp_table}"))
+    
+    # Use optimized batch processor for bulk upsert
+    from batch_processor import bulk_insert_prices
+    return bulk_insert_prices(df)
 
 # ─── Fetch Logic ────────────────────────────────────────────────
+@retry_with_backoff(max_retries=3)
+@with_circuit_breaker('alpha_vantage')
+@log_errors('fetch_prices')
 def fetch_price_data(symbol, outputsize="full"):
     for attempt in range(1, RETRY_LIMIT + 1):
         try:
@@ -200,37 +179,132 @@ def fetch_price_data(symbol, outputsize="full"):
 
     return None
 
-def process_symbol(symbol):
+def process_symbol(symbol, force=False):
+    from incremental_fetch_manager import should_fetch_symbol, update_fetch_tracking
+    
+    # Check if we should fetch this symbol
+    should_fetch, reason = should_fetch_symbol('prices', symbol, force)
+    if not should_fetch:
+        print(f"⏭️  Skipping {symbol}: {reason}")
+        return 0
+    
     latest_date = get_latest_trade_date(symbol)
     outputsize = "compact" if latest_date else "full"
-    print(f"📈 Fetching {symbol} ({outputsize})")
-    records = fetch_price_data(symbol, outputsize=outputsize)
-    if not records:
-        return
-    df = pd.DataFrame(records)
+    print(f"📈 Fetching {symbol} ({outputsize}) - {reason}")
+    
+    try:
+        records = fetch_price_data(symbol, outputsize=outputsize)
+        if not records:
+            update_fetch_tracking('prices', symbol, status='NO_DATA')
+            return 0
+        
+        df = pd.DataFrame(records)
 
-    # If we already have data, trim to strictly newer dates to reduce DB IO
-    if latest_date:
-        df = df[pd.to_datetime(df["trade_date"]).dt.date > latest_date]
+        # If we already have data, trim to strictly newer dates to reduce DB IO
+        if latest_date:
+            df = df[pd.to_datetime(df["trade_date"]).dt.date > latest_date]
 
-    if not df.empty:
-        upsert_prices(df)
-        print(f"✅ Saved {len(df)} rows for {symbol}")
+        if not df.empty:
+            # Validate data quality before saving
+            is_valid, issues = validate_price_data(df)
+            if not is_valid:
+                print(f"⚠️  Data quality issues for {symbol}: {issues}")
+                # Still save but mark with quality issues
+                upsert_prices(df)
+                latest_data_date = pd.to_datetime(df["trade_date"]).dt.date.max()
+                update_fetch_tracking('prices', symbol, latest_data_date, len(df), 'SUCCESS_WITH_ISSUES')
+                print(f"⚠️  Saved {len(df)} rows for {symbol} (with quality issues)")
+                return len(df)
+            else:
+                upsert_prices(df)
+                # Get latest date from processed data for tracking
+                latest_data_date = pd.to_datetime(df["trade_date"]).dt.date.max()
+                update_fetch_tracking('prices', symbol, latest_data_date, len(df), 'SUCCESS')
+                print(f"✅ Saved {len(df)} rows for {symbol}")
+                return len(df)
+        else:
+            update_fetch_tracking('prices', symbol, latest_date, 0, 'NO_NEW_DATA')
+            print(f"ℹ️  No new data for {symbol}")
+            return 0
+            
+    except Exception as e:
+        update_fetch_tracking('prices', symbol, status='FAILED')
+        print(f"❌ Error processing {symbol}: {e}")
+        raise
 
 def main():
-    symbols = pd.read_sql("SELECT symbol FROM symbol_universe", engine)["symbol"].tolist()
+    from incremental_fetch_manager import get_symbols_needing_fetch
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Ultra-premium price fetcher with smart incremental logic")
+    parser.add_argument("--force", action="store_true", help="Force fetch all symbols regardless of previous fetches")
+    args = parser.parse_args()
+    
+    start_time = time.time()
+    print("🚀 Ultra-Premium Price Fetcher Starting...")
+    
+    all_symbols = pd.read_sql("SELECT symbol FROM symbol_universe WHERE is_active = TRUE", engine)["symbol"].tolist()
+    print(f"📊 Found {len(all_symbols)} active symbols in universe")
+    
+    # Get symbols that need fetching
+    symbols_to_fetch = get_symbols_needing_fetch('prices', all_symbols, args.force)
+    
+    if not symbols_to_fetch:
+        print("✅ All symbols are up to date - no fetching needed!")
+        return
+    
+    print(f"📈 Will fetch {len(symbols_to_fetch)} symbols (skipped {len(all_symbols) - len(symbols_to_fetch)})")
+    
+    # Extract just the symbols for processing
+    symbols = [symbol for symbol, reason in symbols_to_fetch]
+    
     # Small random shuffle to avoid the same symbols always hitting at minute boundaries
     random.shuffle(symbols)
+    
+    total_records = 0
+    successful_symbols = 0
+    failed_symbols = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_symbol, s): s for s in symbols}
+        futures = {executor.submit(process_symbol, s, args.force): s for s in symbols}
         for fut in as_completed(futures):
             sym = futures[fut]
             try:
-                fut.result()
+                records = fut.result()
+                if records > 0:
+                    successful_symbols += 1
+                    total_records += records
+                else:
+                    # Still count as successful if no new data
+                    successful_symbols += 1
             except Exception as e:
                 log.exception("Uncaught error processing %s: %s", sym, e)
                 print(f"❌ Error processing {sym}: {e}")
+                failed_symbols += 1
+    
+    # Log final health metrics
+    duration = time.time() - start_time
+    memory_mb = get_memory_usage()
+    
+    status = 'SUCCESS' if failed_symbols == 0 else 'PARTIAL_SUCCESS' if successful_symbols > 0 else 'FAILED'
+    
+    log_script_health(
+        script_name='fetch_prices',
+        status=status,
+        symbols_processed=successful_symbols,
+        symbols_failed=failed_symbols,
+        execution_time=duration,
+        memory_usage=memory_mb,
+        error_summary={'total_records': total_records, 'efficiency_skipped': len(all_symbols) - len(symbols_to_fetch)}
+    )
+    
+    print(f"\n🎯 PRICE FETCHING SUMMARY:")
+    print(f"   Symbols processed: {successful_symbols}")
+    print(f"   Symbols failed: {failed_symbols}") 
+    print(f"   Total records: {total_records:,}")
+    print(f"   Duration: {duration:.1f}s")
+    print(f"   Memory usage: {memory_mb:.1f}MB")
+    print(f"   Efficiency: Skipped {len(all_symbols) - len(symbols_to_fetch)} already-current symbols")
 
 if __name__ == "__main__":
     main()

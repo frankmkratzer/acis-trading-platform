@@ -4,11 +4,14 @@
 #          Incremental + idempotent: recompute last 252d per symbol, upsert on (symbol, as_of_date)
 
 import os
+import time
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from logging_config import setup_logger, log_script_start, log_script_end
 
 load_dotenv()
 engine = create_engine(os.getenv("POSTGRES_URL"))
+logger = setup_logger("compute_forward_returns")
 
 SQL = """
 WITH latest AS (
@@ -21,13 +24,13 @@ ordered AS (
   -- Precompute future adjusted_close using LEAD over trading days
   SELECT
       e.symbol,
-      e.trade_date::date AS as_of_date,
+      e.date::date AS as_of_date,
       e.adjusted_close,
-      LEAD(e.adjusted_close,  21) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_21,
-      LEAD(e.adjusted_close,  63) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_63,
-      LEAD(e.adjusted_close, 126) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_126,
-      LEAD(e.adjusted_close, 252) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_252
-  FROM stock_eod_daily e
+      LEAD(e.adjusted_close,  21) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_21,
+      LEAD(e.adjusted_close,  63) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_63,
+      LEAD(e.adjusted_close, 126) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_126,
+      LEAD(e.adjusted_close, 252) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_252
+  FROM stock_prices e
 ),
 calc AS (
   -- Recompute only the last 252 days per symbol (or everything if symbol is new)
@@ -65,9 +68,26 @@ SELECT COUNT(*)::int AS affected FROM up;
 """
 
 def main():
-    with engine.begin() as conn:
-        affected = conn.execute(text(SQL)).scalar() or 0
-        print(f"✅ forward_returns upserted/updated rows: {affected}")
+    start_time = time.time()
+    log_script_start(logger, "compute_forward_returns", "Compute forward returns using SQL window functions")
+    
+    try:
+        logger.info("Starting forward returns calculation...")
+        
+        with engine.begin() as conn:
+            affected = conn.execute(text(SQL)).scalar() or 0
+            logger.info(f"Forward returns calculation completed: {affected} rows upserted/updated")
+        
+        duration = time.time() - start_time
+        log_script_end(logger, "compute_forward_returns", True, duration, {
+            "Rows processed": affected,
+            "Rate": f"{affected/duration:.1f} rows/second" if duration > 0 else "N/A"
+        })
+        
+    except Exception as e:
+        logger.error(f"Forward returns calculation failed: {e}")
+        log_script_end(logger, "compute_forward_returns", False, time.time() - start_time)
+        raise
 
 if __name__ == "__main__":
     main()

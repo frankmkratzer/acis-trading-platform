@@ -11,6 +11,9 @@ import yaml
 import os
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
+from logging_config import setup_logger
+
+logger = setup_logger("config_manager")
 
 
 @dataclass
@@ -50,13 +53,20 @@ class ConfigManager:
     def load_config(self):
         """Load configuration from YAML file"""
         if not os.path.exists(self.config_path):
+            logger.info(f"Config file not found, creating default: {self.config_path}")
             self.create_default_config()
 
-        with open(self.config_path, 'r') as f:
-            config = yaml.safe_load(f)
+        try:
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
 
-        for name, settings in config.get('strategies', {}).items():
-            self.strategies[name] = StrategyConfig(name=name, **settings)
+            for name, settings in config.get('strategies', {}).items():
+                self.strategies[name] = StrategyConfig(name=name, **settings)
+            
+            logger.info(f"Loaded {len(self.strategies)} strategies from {self.config_path}")
+        except Exception as e:
+            logger.error(f"Failed to load config from {self.config_path}: {e}")
+            raise
 
     def create_default_config(self):
         """Create default configuration file"""

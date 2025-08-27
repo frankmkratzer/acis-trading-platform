@@ -23,6 +23,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from reliability_manager import (
+    retry_with_backoff, log_errors, validate_fundamentals_data,
+    with_circuit_breaker, log_script_health, get_memory_usage
+)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Config
@@ -34,19 +38,19 @@ engine = create_engine(POSTGRES_URL)
 
 AV_URL = "https://www.alphavantage.co/query"
 
-# Concurrency & rate limiting (conservative defaults)
-MAX_WORKERS      = int(os.getenv("AV_FUND_THREADS", "3"))
-MAX_CALLS_PER_MIN= int(os.getenv("AV_MAX_CALLS_PER_MIN", "600"))  # vendor cap
-HEADROOM_PCT     = float(os.getenv("AV_HEADROOM_PCT", "0.25"))    # budget 25% of cap
+# ULTRA-PREMIUM concurrency & rate limiting for 300 calls/min API key
+MAX_WORKERS      = int(os.getenv("AV_FUND_THREADS", "12"))        # Increased for premium
+MAX_CALLS_PER_MIN= int(os.getenv("AV_MAX_CALLS_PER_MIN", "290"))  # Premium 300/min minus buffer
+HEADROOM_PCT     = float(os.getenv("AV_HEADROOM_PCT", "0.95"))    # Use 95% of premium capacity
 EFFECTIVE_LIMIT  = max(1, int(math.floor(MAX_CALLS_PER_MIN * HEADROOM_PCT)))
 TOKENS_PER_SEC   = EFFECTIVE_LIMIT / 60.0
-BUCKET_CAPACITY  = int(os.getenv("AV_BUCKET_CAPACITY", "1"))      # no bursts by default
+BUCKET_CAPACITY  = int(os.getenv("AV_BUCKET_CAPACITY", "5"))      # Small burst allowance
 RETRY_LIMIT      = int(os.getenv("AV_RETRY_LIMIT", "3"))
 FRESHNESS_DAYS   = int(os.getenv("FUND_FRESHNESS_DAYS", "30"))
 VERBOSE_RATE     = os.getenv("AV_VERBOSE_RATE", "0").lower() in ("1", "true", "yes")
 
-# Cap in-flight requests to avoid bursts against AV
-MAX_PARALLEL     = int(os.getenv("AV_MAX_PARALLEL", "1"))
+# Ultra-premium: Allow more parallel requests for 300 calls/min API key
+MAX_PARALLEL     = int(os.getenv("AV_MAX_PARALLEL", "8"))         # Increased for premium
 REQUEST_SEM      = threading.Semaphore(MAX_PARALLEL)
 
 # Adaptive global backpressure knobs
@@ -194,6 +198,9 @@ def to_num(x, as_int=False):
     except Exception:
         return None
 
+@retry_with_backoff(max_retries=2)
+@with_circuit_breaker('alpha_vantage')
+@log_errors('fetch_fundamentals')
 def av_fetch(symbol, function, attempt):
     params = {"function": function, "symbol": symbol, "apikey": API_KEY}
     resp = rate_limited_get(AV_URL, params)
@@ -305,13 +312,92 @@ def parse_reports(symbol, income, balance, cash):
             "commonstocksharesoutstanding","currentnetreceivables","inventory","currentaccountspayable",
             "longtermdebt","shorttermdebt","goodwill","intangibleassets",
             "operatingcashflow","capitalexpenditures","dividendpayout",
-            "free_cf","cash_flow_per_share","fetched_at"
+            "free_cf","cash_flow_per_share","fetched_at",
+            # New columns added for compatibility with removed fundamentals table
+            "pe_ratio","pb_ratio","roe","debt_to_equity","dividend_yield",
+            "revenue_growth","eps_growth","current_ratio","quick_ratio",
+            "working_capital","working_capital_efficiency","shares_outstanding","book_value_per_share"
         ])
 
     df = pd.DataFrame(rows)
     df.columns = [c.lower() for c in df.columns]
     df["fiscal_date"] = pd.to_datetime(df["fiscal_date"], errors="coerce")
     df = df.dropna(subset=["fiscal_date"]).drop_duplicates(subset=["symbol", "fiscal_date"])
+    
+    # Calculate derived financial ratios and metrics (new columns)
+    df = calculate_derived_financials(df)
+    
+    return df
+
+def calculate_derived_financials(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate derived financial ratios and metrics from raw fundamental data."""
+    
+    # Convert numeric columns to float for calculations
+    numeric_cols = ['totalrevenue', 'netincome', 'eps', 'totalassets', 'totalliabilities', 
+                   'totalshareholderequity', 'operatingcashflow', 'capitalexpenditures',
+                   'dividendpayout', 'commonstocksharesoutstanding', 'currentnetreceivables',
+                   'inventory', 'currentaccountspayable', 'longtermdebt', 'shorttermdebt']
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Calculate new financial ratios and metrics
+    
+    # 1. PE Ratio (Price-to-Earnings) - Need stock price, approximated from market data if available
+    # For now, leave as NULL - would need current stock price
+    df['pe_ratio'] = None
+    
+    # 2. PB Ratio (Price-to-Book) - Need stock price and book value per share
+    # Calculate book value per share first
+    df['book_value_per_share'] = df['totalshareholderequity'] / df['commonstocksharesoutstanding'].replace(0, None)
+    df['pb_ratio'] = None  # Need stock price
+    
+    # 3. ROE (Return on Equity) - Net Income / Shareholders' Equity  
+    df['roe'] = df['netincome'] / df['totalshareholderequity'].replace(0, None)
+    
+    # 4. Debt-to-Equity Ratio - Total Debt / Shareholders' Equity
+    total_debt = (df['longtermdebt'].fillna(0) + df['shorttermdebt'].fillna(0))
+    df['debt_to_equity'] = total_debt / df['totalshareholderequity'].replace(0, None)
+    
+    # 5. Dividend Yield - Need stock price, leave as NULL for now
+    df['dividend_yield'] = None
+    
+    # 6. Revenue Growth - Need historical data for comparison
+    df['revenue_growth'] = None  # Would need previous period data
+    
+    # 7. EPS Growth - Need historical data for comparison  
+    df['eps_growth'] = None  # Would need previous period data
+    
+    # 8. Current Ratio - Current Assets / Current Liabilities
+    # Approximate current assets and current liabilities
+    current_assets = (df['cashandcashequivalentsatcarryingvalue'].fillna(0) + 
+                     df['currentnetreceivables'].fillna(0) + 
+                     df['inventory'].fillna(0))
+    current_liabilities = df['currentaccountspayable'].fillna(0)
+    df['current_ratio'] = current_assets / current_liabilities.replace(0, None)
+    
+    # 9. Quick Ratio - (Current Assets - Inventory) / Current Liabilities
+    quick_assets = current_assets - df['inventory'].fillna(0)
+    df['quick_ratio'] = quick_assets / current_liabilities.replace(0, None)
+    
+    # 10. Working Capital - Current Assets - Current Liabilities
+    df['working_capital'] = current_assets - current_liabilities
+    
+    # 11. Working Capital Efficiency - Revenue / Working Capital
+    df['working_capital_efficiency'] = df['totalrevenue'] / df['working_capital'].replace(0, None)
+    
+    # 12. Shares Outstanding - use existing commonstocksharesoutstanding
+    df['shares_outstanding'] = df['commonstocksharesoutstanding']
+    
+    # Clean up infinite and extremely large values
+    ratio_cols = ['roe', 'debt_to_equity', 'current_ratio', 'quick_ratio', 'working_capital_efficiency']
+    for col in ratio_cols:
+        if col in df.columns:
+            df[col] = df[col].replace([float('inf'), float('-inf')], None)
+            # Cap extreme values
+            df[col] = df[col].clip(-1000, 1000)
+    
     return df
 
 # BIGINT columns in Postgres (must be integer-looking text in CSV)
@@ -322,8 +408,14 @@ INT_COLS = [
     "commonstocksharesoutstanding","currentnetreceivables","inventory","currentaccountspayable",
     "longtermdebt","shorttermdebt","goodwill","intangibleassets",
     "operatingcashflow","capitalexpenditures","dividendpayout","free_cf",
+    # New BIGINT columns
+    "working_capital","shares_outstanding",
 ]
-FLOAT_COLS = ["eps", "cash_flow_per_share"]  # fine to leave as-is
+FLOAT_COLS = ["eps", "cash_flow_per_share", 
+              # New numeric ratio columns
+              "pe_ratio", "pb_ratio", "roe", "debt_to_equity", "dividend_yield",
+              "revenue_growth", "eps_growth", "current_ratio", "quick_ratio", 
+              "working_capital_efficiency", "book_value_per_share"]
 
 # Columns, normalized lower-case
 LOWER_COLS = [
@@ -331,7 +423,11 @@ LOWER_COLS = [
     "totalrevenue","grossprofit","netincome","eps",
     "totalassets","totalliabilities","totalshareholderequity",
     "operatingcashflow","capitalexpenditures","dividendpayout",
-    "free_cf","cash_flow_per_share","fetched_at"
+    "free_cf","cash_flow_per_share","fetched_at",
+    # New derived columns
+    "pe_ratio","pb_ratio","roe","debt_to_equity","dividend_yield",
+    "revenue_growth","eps_growth","current_ratio","quick_ratio",
+    "working_capital","working_capital_efficiency","shares_outstanding","book_value_per_share"
 ]
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -409,7 +505,21 @@ class BatchedWriter:
                     dividendpayout         = EXCLUDED.dividendpayout,
                     free_cf                = EXCLUDED.free_cf,
                     cash_flow_per_share    = EXCLUDED.cash_flow_per_share,
-                    fetched_at             = EXCLUDED.fetched_at;
+                    fetched_at             = EXCLUDED.fetched_at,
+                    -- New derived columns
+                    pe_ratio               = EXCLUDED.pe_ratio,
+                    pb_ratio               = EXCLUDED.pb_ratio,
+                    roe                    = EXCLUDED.roe,
+                    debt_to_equity         = EXCLUDED.debt_to_equity,
+                    dividend_yield         = EXCLUDED.dividend_yield,
+                    revenue_growth         = EXCLUDED.revenue_growth,
+                    eps_growth             = EXCLUDED.eps_growth,
+                    current_ratio          = EXCLUDED.current_ratio,
+                    quick_ratio            = EXCLUDED.quick_ratio,
+                    working_capital        = EXCLUDED.working_capital,
+                    working_capital_efficiency = EXCLUDED.working_capital_efficiency,
+                    shares_outstanding     = EXCLUDED.shares_outstanding,
+                    book_value_per_share   = EXCLUDED.book_value_per_share;
             """)
             raw.commit()
             logger.info("📦 Flushed %d row(s) into %s", len(df), self.table)
