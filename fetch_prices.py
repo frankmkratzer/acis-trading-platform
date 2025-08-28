@@ -10,11 +10,17 @@ import logging
 import threading
 import requests
 import pandas as pd
+import numpy as np
 from sqlalchemy import create_engine, text
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from typing import Optional, Dict, List, Tuple
+from functools import wraps
+import json
+from dataclasses import dataclass
+from enum import Enum
 
 # ─── Config ─────────────────────────────────────────────────────
 load_dotenv()
@@ -37,6 +43,13 @@ MAX_WORKERS = 8  # Number of parallel threads
 CALLS_PER_MIN = 580  # Slightly below 600 for safety
 MIN_INTERVAL = 60.0 / CALLS_PER_MIN  # Minimum seconds between calls
 
+# Retry configuration
+MAX_RETRIES = 3
+BASE_RETRY_DELAY = 1.0  # seconds
+MAX_RETRY_DELAY = 300  # 5 minutes max
+CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures
+CIRCUIT_BREAKER_TIMEOUT = 300  # 5 minutes
+
 # ─── Logging ────────────────────────────────────────────────────
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
@@ -50,8 +63,82 @@ log = logging.getLogger("fetch_prices")
 last_call_time = 0
 rate_limit_lock = threading.Lock()
 
+class FetchStatus(Enum):
+    SUCCESS = "SUCCESS"
+    NO_DATA = "NO_DATA"
+    NO_NEW = "NO_NEW"
+    FAILED = "FAILED"
+    RATE_LIMITED = "RATE_LIMITED"
+    INVALID_DATA = "INVALID_DATA"
+    RETRYING = "RETRYING"
+
+@dataclass
+class CircuitBreaker:
+    """Circuit breaker for API calls"""
+    failure_count: int = 0
+    last_failure_time: Optional[float] = None
+    is_open: bool = False
+    
+    def record_success(self):
+        self.failure_count = 0
+        self.is_open = False
+        
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= CIRCUIT_BREAKER_THRESHOLD:
+            self.is_open = True
+            log.warning(f"Circuit breaker opened after {self.failure_count} failures")
+    
+    def can_proceed(self) -> bool:
+        if not self.is_open:
+            return True
+        if self.last_failure_time and (time.time() - self.last_failure_time > CIRCUIT_BREAKER_TIMEOUT):
+            self.is_open = False
+            self.failure_count = 0
+            log.info("Circuit breaker reset after timeout")
+            return True
+        return False
+
+circuit_breaker = CircuitBreaker()
+
+def exponential_backoff_retry(max_retries=MAX_RETRIES):
+    """Decorator for exponential backoff retry logic"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    if not circuit_breaker.can_proceed():
+                        raise Exception("Circuit breaker is open")
+                    
+                    result = func(*args, **kwargs)
+                    circuit_breaker.record_success()
+                    return result
+                    
+                except (requests.RequestException, requests.Timeout) as e:
+                    last_exception = e
+                    circuit_breaker.record_failure()
+                    
+                    if attempt < max_retries - 1:
+                        # Calculate delay with exponential backoff and jitter
+                        delay = min(
+                            BASE_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1),
+                            MAX_RETRY_DELAY
+                        )
+                        log.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                    else:
+                        log.error(f"All {max_retries} attempts failed: {e}")
+                        
+            raise last_exception if last_exception else Exception(f"Failed after {max_retries} attempts")
+        return wrapper
+    return decorator
+
+@exponential_backoff_retry()
 def rate_limited_get(url, params, timeout=20):
-    """Rate-limited GET request"""
+    """Rate-limited GET request with retry logic"""
     global last_call_time
     
     with rate_limit_lock:
@@ -62,7 +149,10 @@ def rate_limited_get(url, params, timeout=20):
             time.sleep(sleep_time)
         last_call_time = time.time()
     
-    return requests.get(url, params=params, timeout=timeout)
+    # Set encoding to handle potential Unicode issues
+    response = requests.get(url, params=params, timeout=timeout)
+    response.encoding = response.apparent_encoding or 'utf-8'
+    return response
 
 # ─── DB helpers ─────────────────────────────────────────────────
 def get_latest_trade_date(symbol):
@@ -70,8 +160,63 @@ def get_latest_trade_date(symbol):
     with engine.connect() as conn:
         return conn.execute(query, {"symbol": symbol}).scalar()
 
-def upsert_prices(df: pd.DataFrame):
+def validate_price_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """Validate price data for consistency and quality"""
+    issues = []
+    
+    # Remove rows with invalid OHLC relationships
+    invalid_ohlc = (
+        (df['high'] < df['low']) | 
+        (df['high'] < df['open']) | 
+        (df['high'] < df['close']) |
+        (df['low'] > df['open']) | 
+        (df['low'] > df['close'])
+    )
+    
+    if invalid_ohlc.any():
+        issues.append(f"Removed {invalid_ohlc.sum()} rows with invalid OHLC relationships")
+        df = df[~invalid_ohlc]
+    
+    # Check for zero or negative prices
+    zero_prices = (df[['open', 'high', 'low', 'close']] <= 0).any(axis=1)
+    if zero_prices.any():
+        issues.append(f"Removed {zero_prices.sum()} rows with zero/negative prices")
+        df = df[~zero_prices]
+    
+    # Check for extreme price movements (>50% in a day)
+    df['daily_change'] = abs(df['close'] - df['open']) / df['open']
+    extreme_moves = df['daily_change'] > 0.5
+    if extreme_moves.any():
+        issues.append(f"Flagged {extreme_moves.sum()} rows with >50% daily moves")
+        # Don't remove these, just flag them
+    
+    # Check for volume anomalies
+    if 'volume' in df.columns:
+        # Negative volumes
+        negative_vol = df['volume'] < 0
+        if negative_vol.any():
+            issues.append(f"Fixed {negative_vol.sum()} rows with negative volume")
+            df.loc[negative_vol, 'volume'] = 0
+    
+    # Remove temporary calculation columns
+    df = df.drop(columns=['daily_change'], errors='ignore')
+    
+    return df, issues
+
+def upsert_prices(df: pd.DataFrame, symbol: str = None):
+    """Upsert prices with validation and error handling"""
     if df.empty:
+        return
+    
+    # Validate data first
+    df, validation_issues = validate_price_data(df)
+    
+    if validation_issues and symbol:
+        for issue in validation_issues:
+            log.warning(f"{symbol}: {issue}")
+    
+    if df.empty:
+        log.error(f"All data failed validation for {symbol}")
         return
 
     
@@ -122,17 +267,28 @@ def fetch_price_data(symbol, outputsize="compact"):
             log.warning(f"HTTP {resp.status_code} for {symbol}")
             return None
 
-        raw = resp.json()
+        try:
+            raw = resp.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            log.warning(f"Failed to decode JSON response for {symbol}: {e}")
+            return None
         
         # Check for rate limit or error messages
         if "Note" in raw:
             log.warning(f"API rate limit note for {symbol}: {raw['Note']}")
-            time.sleep(60)  # Wait a minute if rate limited
+            # Exponential backoff for rate limiting
+            wait_time = min(60 * (2 ** circuit_breaker.failure_count), MAX_RETRY_DELAY)
+            time.sleep(wait_time)
             return None
         
         if "Information" in raw:
             log.warning(f"API info for {symbol}: {raw['Information']}")
-            time.sleep(10)
+            # Check if this is a rate limit message
+            if "higher API call volume" in raw.get('Information', ''):
+                wait_time = min(30 * (2 ** circuit_breaker.failure_count), MAX_RETRY_DELAY)
+                time.sleep(wait_time)
+            else:
+                time.sleep(10)
             return None
             
         if "Error Message" in raw:
@@ -146,26 +302,28 @@ def fetch_price_data(symbol, outputsize="compact"):
 
         records = []
         for date_str, values in ts.items():
-            raw_close = float(values.get("4. close", 0) or 0)
-            raw_adjusted = float(values.get("5. adjusted close", 0) or 0)
+            # Fix: Remove 'or 0' which causes the bug
+            raw_close = float(values.get("4. close", 0))
+            raw_adjusted = float(values.get("5. adjusted close", 0))
             
-            # Use close price if adjusted seems wrong
-            if raw_adjusted == 0 or (raw_close > 0 and (raw_adjusted / raw_close < 0.5 or raw_adjusted / raw_close > 2.0)):
+            # Validate and use close price if adjusted seems wrong
+            if raw_adjusted == 0 or (raw_close > 0 and (raw_adjusted / raw_close < 0.3 or raw_adjusted / raw_close > 3.0)):
                 adjusted_close = raw_close
+                log.debug(f"{symbol}: Using close price instead of adjusted for {date_str}")
             else:
                 adjusted_close = raw_adjusted
             
             records.append({
                 "symbol": symbol,
                 "trade_date": date_str,
-                "open": float(values.get("1. open", 0) or 0),
-                "high": float(values.get("2. high", 0) or 0),
-                "low": float(values.get("3. low", 0) or 0),
-                "close": float(values.get("close", 0) or 0),
+                "open": float(values.get("1. open", 0)),
+                "high": float(values.get("2. high", 0)),
+                "low": float(values.get("3. low", 0)),
+                "close": raw_close,
                 "adjusted_close": adjusted_close,
-                "volume": int(values.get("6. volume", 0) or 0),
-                "dividend_amount": float(values.get("7. dividend amount", 0) or 0),
-                "split_coefficient": float(values.get("8. split coefficient", 1) or 1),
+                "volume": int(values.get("6. volume", 0)),
+                "dividend_amount": float(values.get("7. dividend amount", 0)),
+                "split_coefficient": float(values.get("8. split coefficient", 1)),
                 "fetched_at": datetime.now(timezone.utc),
             })
         
@@ -175,20 +333,32 @@ def fetch_price_data(symbol, outputsize="compact"):
         log.exception(f"Error fetching {symbol}: {e}")
         return None
 
-def process_symbol(symbol, pbar=None):
-    """Process a single symbol"""
-    latest_date = get_latest_trade_date(symbol)
-    
-    # Use compact if we have data, full for new symbols
-    outputsize = "compact" if latest_date else "full"
-    
-    if pbar:
-        pbar.set_postfix({'symbol': symbol, 'mode': outputsize})
+def process_symbol(symbol, pbar=None, retry_count=0) -> Tuple[int, str]:
+    """Process a single symbol with comprehensive error handling"""
+    max_symbol_retries = 3
     
     try:
+        latest_date = get_latest_trade_date(symbol)
+        
+        # Use compact if we have recent data (within 30 days), full otherwise
+        days_since_update = (datetime.now().date() - latest_date).days if latest_date else float('inf')
+        outputsize = "compact" if latest_date and days_since_update < 30 else "full"
+        
+        if pbar:
+            pbar.set_postfix({'symbol': symbol, 'mode': outputsize, 'retry': retry_count})
+        
+        # Check circuit breaker
+        if not circuit_breaker.can_proceed():
+            log.warning(f"Circuit breaker open, skipping {symbol}")
+            return 0, FetchStatus.RATE_LIMITED.value
+        
         records = fetch_price_data(symbol, outputsize=outputsize)
         if not records:
-            return 0, 'NO_DATA'
+            # Retry with exponential backoff for temporary failures
+            if retry_count < max_symbol_retries:
+                time.sleep(BASE_RETRY_DELAY * (2 ** retry_count))
+                return process_symbol(symbol, pbar, retry_count + 1)
+            return 0, FetchStatus.NO_DATA.value
         
         df = pd.DataFrame(records)
         
@@ -197,14 +367,32 @@ def process_symbol(symbol, pbar=None):
             df = df[pd.to_datetime(df["trade_date"]).dt.date > latest_date]
         
         if not df.empty:
-            upsert_prices(df)
-            return len(df), 'SUCCESS'
-        else:
-            return 0, 'NO_NEW'
+            # Validate before inserting
+            original_len = len(df)
+            df, issues = validate_price_data(df)
             
+            if df.empty:
+                log.error(f"{symbol}: All {original_len} records failed validation")
+                return 0, FetchStatus.INVALID_DATA.value
+            
+            if len(df) < original_len:
+                log.warning(f"{symbol}: {original_len - len(df)} records failed validation")
+            
+            upsert_prices(df, symbol)
+            return len(df), FetchStatus.SUCCESS.value
+        else:
+            return 0, FetchStatus.NO_NEW.value
+            
+    except requests.RequestException as e:
+        log.error(f"Network error processing {symbol}: {e}")
+        if retry_count < max_symbol_retries:
+            time.sleep(BASE_RETRY_DELAY * (2 ** retry_count))
+            return process_symbol(symbol, pbar, retry_count + 1)
+        return 0, FetchStatus.FAILED.value
+        
     except Exception as e:
-        log.error(f"Error processing {symbol}: {e}")
-        return 0, 'FAILED'
+        log.exception(f"Unexpected error processing {symbol}: {e}")
+        return 0, FetchStatus.FAILED.value
 
 def main():
     import argparse
@@ -237,7 +425,8 @@ def main():
     random.shuffle(symbols)
     
     total_records = 0
-    status_counts = {'SUCCESS': 0, 'NO_DATA': 0, 'NO_NEW': 0, 'FAILED': 0}
+    status_counts = {status.value: 0 for status in FetchStatus}
+    failed_symbols = []
     
     print("\n[PROGRESS] Processing symbols:")
     
@@ -255,6 +444,9 @@ def main():
                         records, status = fut.result()
                         status_counts[status] += 1
                         total_records += records
+                        
+                        if status == FetchStatus.FAILED.value:
+                            failed_symbols.append(sym)
                         
                         pbar.update(1)
                         pbar.set_postfix({
@@ -277,6 +469,9 @@ def main():
                 status_counts[status] += 1
                 total_records += records
                 
+                if status == FetchStatus.FAILED.value:
+                    failed_symbols.append(symbol)
+                
                 pbar.update(1)
                 pbar.set_postfix({
                     'Success': status_counts['SUCCESS'],
@@ -290,13 +485,26 @@ def main():
     
     print(f"\n[SUMMARY] PRICE FETCHING SUMMARY:")
     print(f"   Total symbols: {len(symbols)}")
-    print(f"   Successful: {status_counts['SUCCESS']}")
-    print(f"   No data: {status_counts['NO_DATA']}")
-    print(f"   No new data: {status_counts['NO_NEW']}")
-    print(f"   Failed: {status_counts['FAILED']}")
+    print(f"   Successful: {status_counts.get(FetchStatus.SUCCESS.value, 0)}")
+    print(f"   No data: {status_counts.get(FetchStatus.NO_DATA.value, 0)}")
+    print(f"   No new data: {status_counts.get(FetchStatus.NO_NEW.value, 0)}")
+    print(f"   Invalid data: {status_counts.get(FetchStatus.INVALID_DATA.value, 0)}")
+    print(f"   Rate limited: {status_counts.get(FetchStatus.RATE_LIMITED.value, 0)}")
+    print(f"   Failed: {status_counts.get(FetchStatus.FAILED.value, 0)}")
     print(f"   Total records: {total_records:,}")
     print(f"   Duration: {duration:.1f}s")
     print(f"   Rate: {len(symbols)/duration:.2f} symbols/sec")
+    
+    # Save failed symbols for retry
+    if failed_symbols:
+        failed_file = f"logs/failed_symbols_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(failed_file, 'w') as f:
+            json.dump(failed_symbols, f, indent=2)
+        print(f"\n[INFO] Failed symbols saved to {failed_file} for retry")
+    
+    # Log summary to file
+    log.info(f"Fetch complete: {len(symbols)} symbols, {total_records} records, "
+             f"{status_counts.get(FetchStatus.FAILED.value, 0)} failures")
 
 if __name__ == "__main__":
     main()

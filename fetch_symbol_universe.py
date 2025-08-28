@@ -183,35 +183,56 @@ def update_symbol_universe(df):
                 if not symbol:
                     logger.warning(f"Skipping row with empty symbol: {row.get('name', 'Unknown')}")
                     continue
+                
+                # Parse dates
+                delisted_date = None
+                if pd.notna(row.get('delistingdate')):
+                    try:
+                        delisted_date = pd.to_datetime(row.get('delistingdate')).date()
+                    except:
+                        pass
+                
+                # Determine security type from assetType
+                asset_type = str(row.get('assettype', 'Stock')).strip()
+                security_type = 'Common Stock' if asset_type == 'Stock' else asset_type
                     
                 symbols_data.append({
                     'symbol': symbol,
-                    'name': str(row.get('name', '')).strip()[:200] or 'Unknown Company',  # Provide default name
+                    'name': str(row.get('name', '')).strip()[:200] or 'Unknown Company',
                     'exchange': row.get('exchange', 'UNKNOWN'),
-                    'security_type': 'Common Stock',  # Default to Common Stock for US stocks
-                    'is_etf': False,
-                    'country': 'USA',  # Changed from 'US' to 'USA' to match check constraint
-                    'currency': 'USD'
+                    'security_type': security_type,
+                    'is_etf': 'ETF' in asset_type,
+                    'country': 'USA',
+                    'currency': 'USD',
+                    'delisted_date': delisted_date
                 })
             
             # Create temp table for bulk upsert
             temp_table = f"temp_symbol_universe_{int(time.time())}"
             
             df_temp = pd.DataFrame(symbols_data)
+            # Ensure date columns are properly typed
+            if 'delisted_date' in df_temp.columns:
+                df_temp['delisted_date'] = pd.to_datetime(df_temp['delisted_date'], errors='coerce')
+            
             df_temp.to_sql(temp_table, conn, if_exists='replace', index=False, method='multi')
             
-            # Ultra-fast upsert
+            # Ultra-fast upsert with all fields
             result = conn.execute(text(f"""
                 INSERT INTO symbol_universe (
-                    symbol, name, exchange, security_type, is_etf, country, currency, fetched_at
+                    symbol, name, exchange, security_type, is_etf, country, currency, 
+                    delisted_date, fetched_at
                 )
                 SELECT 
-                    symbol, name, exchange, security_type, is_etf, country, currency, CURRENT_TIMESTAMP
+                    symbol, name, exchange, security_type, is_etf, country, currency,
+                    delisted_date::date, CURRENT_TIMESTAMP
                 FROM {temp_table}
                 ON CONFLICT (symbol) DO UPDATE SET
                     name = EXCLUDED.name,
                     exchange = EXCLUDED.exchange,
                     security_type = EXCLUDED.security_type,
+                    is_etf = EXCLUDED.is_etf,
+                    delisted_date = EXCLUDED.delisted_date,
                     fetched_at = CURRENT_TIMESTAMP
                 RETURNING symbol
             """))

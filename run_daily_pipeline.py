@@ -33,48 +33,51 @@ class DailyPipelineRunner:
         self.results = {}
         
         # Define daily scripts - data that changes every trading day
+        # Order is critical: Universe -> Prices -> Derived Data
         self.scripts = [
+            # STEP 1: Update symbol universe (foundation for all fetches)
             ScriptConfig(
                 "fetch_symbol_universe.py",
                 600,
-                True, 
+                True,  # Critical - everything depends on this
                 (), 
                 "Update US stock symbol universe (NYSE, NASDAQ, AMEX)"
             ),
+            
+            # STEP 2: Fetch market benchmark data
             ScriptConfig(
                 "fetch_sp500_history.py", 
                 300, 
-                False, 
+                False,  # Not critical but needed for relative performance
                 ("fetch_symbol_universe.py",), 
                 "Fetch S&P 500 price history for benchmarking"
             ),
+            
+            # STEP 3: Fetch primary price data (most important)
             ScriptConfig(
                 "fetch_prices.py", 
-                2400, 
-                True, 
+                3600,  # Increased timeout for full universe
+                True,  # Critical - all analysis depends on prices
                 ("fetch_symbol_universe.py",), 
                 "Ultra-premium price fetcher (Alpha Vantage 600 calls/min)"
             ),
+            
+            # STEP 4: Fetch options data (supplemental)
             ScriptConfig(
                 "fetch_options.py",
                 1800,
                 False,  # Not critical - options are supplemental data
-                ("fetch_symbol_universe.py",),
+                ("fetch_symbol_universe.py", "fetch_prices.py"),  # Needs both universe and prices
                 "Fetch real-time and historical options data with Greeks"
             ),
+            
+            # STEP 5: Calculate technical indicators from price data
             ScriptConfig(
                 "fetch_technical_indicators.py", 
-                3600, 
-                True, 
+                2400,  # Reduced from 3600 
+                False,  # Changed to non-critical since it's derived data
                 ("fetch_prices.py",), 
                 "Calculate technical indicators locally from price data"
-            ),
-            ScriptConfig(
-                "calculate_quality_rankings.py",
-                1800,
-                False,  # Not critical - rankings are derived data
-                ("fetch_prices.py", "fetch_sp500_history.py"),  # Needs prices and SP500 data
-                "Calculate stock quality rankings (SP500 outperformance, FCF, fundamentals)"
             ),
         ]
         
@@ -117,12 +120,14 @@ class DailyPipelineRunner:
         start_time = time.time()
         
         try:
-            # Run the script
+            # Run the script with UTF-8 encoding to handle Unicode properly
             result = subprocess.run(
                 [sys.executable, str(script_path)],
                 cwd=str(self.script_dir),
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',  # Replace undecodable chars instead of failing
                 timeout=script.timeout,
                 check=False
             )

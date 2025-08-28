@@ -34,29 +34,105 @@ class WeeklyPipelineRunner:
         self.results = {}
         
         # Define weekly/monthly scripts - data that changes infrequently
+        # Order is critical: Fundamentals -> News -> Derived Analysis -> Rankings
         self.scripts = [
+            # STEP 1: Fetch company overview (sector, industry, market cap)
+            ScriptConfig(
+                "fetch_company_overview.py",
+                3600,
+                False,  # Not critical but very valuable for analysis
+                (),  # No dependencies - uses symbol_universe table
+                "Fetch sector, industry, market cap and fundamental metrics",
+                "weekly"
+            ),
+            
+            # STEP 2: Fetch fundamental data (quarterly/annual reports)
             ScriptConfig(
                 "fetch_fundamentals.py", 
                 3600, 
-                True, 
-                (), 
+                True,  # Critical - quality rankings depend on this
+                ("fetch_company_overview.py",),  # Can use sector/industry from overview
                 "Fetch company fundamentals (quarterly/annual data)",
                 "weekly"
             ),
+            
+            # STEP 3: Fetch news sentiment (refreshed weekly)
+            ScriptConfig(
+                "fetch_news_sentiment.py",
+                2400,  # 40 minutes - lots of API calls
+                False,  # Not critical but valuable signal
+                (),  # No dependencies - uses symbol_universe table
+                "Fetch news sentiment and market narrative analysis",
+                "weekly"
+            ),
+            
+            # STEP 4: Extract dividend history from price data
             ScriptConfig(
                 "fetch_dividend_history.py", 
                 600, 
-                False, 
-                (), 
+                False,  # Not critical but useful for analysis
+                (),  # Uses stock_prices table which should exist from daily runs
                 "Extract dividend data from accumulated price data",
                 "weekly"
             ),
+            
+            # STEP 5: Compute forward returns for ML features
             ScriptConfig(
                 "compute_forward_returns.py", 
-                600, 
-                True, 
-                (), 
+                1200,  # Increased timeout for large dataset
+                True,  # Critical for ML features and analysis
+                (),  # Uses stock_prices table which should exist from daily runs
                 "Calculate forward returns from accumulated price history",
+                "weekly"
+            ),
+            
+            # STEP 6: Calculate comprehensive quality rankings (all 7 components)
+            ScriptConfig(
+                "calculate_quality_rankings.py",
+                1800,
+                True,  # Critical - main output of the system
+                ("fetch_fundamentals.py", "fetch_news_sentiment.py"),  # Depends on fundamentals and sentiment
+                "Calculate 7-factor rankings: SP500, Cash Flow, Fundamentals, Sentiment, Value, Breakout, Growth",
+                "weekly"
+            ),
+            
+            # STEP 7: Generate historical rankings for ML training (if needed)
+            ScriptConfig(
+                "calculate_historical_rankings.py",
+                7200,  # 2 hours - can be long for initial run
+                False,  # Not critical for weekly operations
+                ("calculate_quality_rankings.py",),  # Depends on current rankings being calculated
+                "Generate historical rankings for ML/DL model training (skips existing dates)",
+                "monthly"  # Run less frequently
+            ),
+            
+            # STEP 8: Calculate forward returns for ML targets
+            ScriptConfig(
+                "calculate_forward_returns.py",
+                1200,
+                False,  # Not critical but needed for ML
+                ("calculate_quality_rankings.py",),
+                "Calculate forward returns for ML target variables",
+                "weekly"
+            ),
+            
+            # STEP 8: Train/update ML models
+            ScriptConfig(
+                "ml_strategy_framework.py",
+                3600,  # 1 hour for model training
+                False,  # Not critical for weekly operations
+                ("calculate_forward_returns.py",),
+                "Train ML models for return prediction and strategy generation",
+                "monthly"  # Retrain monthly or on demand
+            ),
+            
+            # STEP 9: Generate trading signals
+            ScriptConfig(
+                "generate_trading_signals.py",
+                600,
+                False,  # Not critical but valuable
+                ("ml_strategy_framework.py",),
+                "Generate ML-based trading signals and position recommendations",
                 "weekly"
             ),
         ]
@@ -100,12 +176,14 @@ class WeeklyPipelineRunner:
         start_time = time.time()
         
         try:
-            # Run the script
+            # Run the script with UTF-8 encoding to handle Unicode properly
             result = subprocess.run(
                 [sys.executable, str(script_path)],
                 cwd=str(self.script_dir),
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',  # Replace undecodable chars instead of failing
                 timeout=script.timeout,
                 check=False
             )
@@ -113,7 +191,7 @@ class WeeklyPipelineRunner:
             duration = time.time() - start_time
             
             if result.returncode == 0:
-                logger.info(f"✅ {script.name} completed successfully in {duration:.1f}s")
+                logger.info(f"[SUCCESS] {script.name} completed successfully in {duration:.1f}s")
                 return {
                     'success': True,
                     'duration': duration,
@@ -122,7 +200,7 @@ class WeeklyPipelineRunner:
                     'returncode': result.returncode
                 }
             else:
-                logger.error(f"❌ {script.name} failed with return code {result.returncode}")
+                logger.error(f"[FAILED] {script.name} failed with return code {result.returncode}")
                 if result.stderr:
                     logger.error(f"STDERR: {result.stderr}")
                 return {
@@ -136,7 +214,7 @@ class WeeklyPipelineRunner:
                 
         except subprocess.TimeoutExpired:
             duration = time.time() - start_time
-            logger.error(f"⏰ {script.name} timed out after {script.timeout}s")
+            logger.error(f"[TIMEOUT] {script.name} timed out after {script.timeout}s")
             return {
                 'success': False,
                 'duration': duration,
@@ -144,7 +222,7 @@ class WeeklyPipelineRunner:
             }
         except Exception as e:
             duration = time.time() - start_time
-            logger.error(f"💥 {script.name} failed with exception: {e}")
+            logger.error(f"[EXCEPTION] {script.name} failed with exception: {e}")
             return {
                 'success': False,
                 'duration': duration,
@@ -158,14 +236,14 @@ class WeeklyPipelineRunner:
         failed_scripts = 0
         skipped_scripts = 0
         
-        logger.info("📅 Starting ACIS Weekly/Monthly Data Pipeline")
+        logger.info("[PIPELINE] Starting ACIS Weekly/Monthly Data Pipeline")
         logger.info(f"Pipeline mode: {'Skip non-critical on failure' if skip_non_critical else 'Run all scripts'}")
         logger.info("Processing low-frequency data: fundamentals, dividends, forward returns")
         
         for script in self.scripts:
             # Skip non-critical scripts if we have failures and skip mode is enabled
             if skip_non_critical and not script.critical and failed_scripts > 0:
-                logger.info(f"⏭️  Skipping non-critical script {script.name} due to previous failures")
+                logger.info(f"[SKIP] Skipping non-critical script {script.name} due to previous failures")
                 skipped_scripts += 1
                 continue
             
@@ -180,7 +258,7 @@ class WeeklyPipelineRunner:
                 
                 # Stop pipeline if critical script fails
                 if script.critical:
-                    logger.error(f"❌ Critical script {script.name} failed - stopping weekly pipeline")
+                    logger.error(f"[CRITICAL] Script {script.name} failed - stopping weekly pipeline")
                     break
         
         pipeline_duration = time.time() - pipeline_start
@@ -201,7 +279,7 @@ class WeeklyPipelineRunner:
     def print_summary(self, summary: dict):
         """Print pipeline execution summary"""
         logger.info("=" * 80)
-        logger.info("📅 ACIS WEEKLY/MONTHLY PIPELINE SUMMARY")
+        logger.info("[SUMMARY] ACIS WEEKLY/MONTHLY PIPELINE SUMMARY")
         logger.info("=" * 80)
         
         logger.info(f"Total Duration: {summary['duration']:.1f} seconds")
@@ -211,14 +289,14 @@ class WeeklyPipelineRunner:
         
         logger.info("\nWeekly/Monthly Script Results:")
         for script_name, result in summary['results'].items():
-            status = "✅ SUCCESS" if result['success'] else "❌ FAILED"
+            status = "[SUCCESS]" if result['success'] else "[FAILED]"
             duration = result['duration']
             logger.info(f"  {script_name}: {status} ({duration:.1f}s)")
             
             if not result['success'] and 'error' in result:
                 logger.info(f"    Error: {result['error']}")
         
-        overall_status = "🎉 WEEKLY PIPELINE COMPLETED" if summary['success'] else "💥 WEEKLY PIPELINE FAILED"
+        overall_status = "[COMPLETE] WEEKLY PIPELINE COMPLETED" if summary['success'] else "[FAILED] WEEKLY PIPELINE FAILED"
         logger.info(f"\n{overall_status}")
         logger.info("=" * 80)
 

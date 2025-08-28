@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # File: compute_forward_returns.py
-# Purpose: Compute 1m, 3m, 6m, 12m forward returns entirely in SQL (window functions)
+# Purpose: Compute simple 1m, 3m, 6m, 12m forward returns for daily time series
+#          Uses forward_returns table (not ml_forward_returns)
 #          Incremental + idempotent: recompute last 252d per symbol, upsert on (symbol, as_of_date)
 
 import os

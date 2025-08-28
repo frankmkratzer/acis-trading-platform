@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Fundamentals Data Fetcher
-Fetches annual and quarterly fundamentals from Alpha Vantage
-Optimized for 600 calls/min Premium API
+Fixed Fundamentals Data Fetcher
+Fetches quarterly fundamentals from Alpha Vantage with proper field mappings
 """
 
 import os
@@ -222,19 +221,21 @@ def fetch_overview(symbol):
         return None
 
 def process_fundamentals_data(symbol, income_data, balance_data, cash_data, overview_data):
-    """Combine and process all fundamentals data"""
+    """Combine and process ALL historical fundamentals data"""
     records = []
     
-    # Process annual reports
-    if income_data and 'annualReports' in income_data:
-        annual_reports = income_data['annualReports']
+    # Process ALL quarterly reports (no limit - get full history)
+    if income_data and 'quarterlyReports' in income_data:
+        quarterly_reports = income_data['quarterlyReports']  # Get ALL quarterly data
         
-        for report in annual_reports:
+        for report in quarterly_reports:
+            fiscal_date = report.get('fiscalDateEnding')
+            
             record = {
                 'symbol': symbol,
-                'fiscal_date_ending': parse_date(report.get('fiscalDateEnding')),
-                'period_type': 'annual',
-                'reported_date': parse_date(report.get('reportedDate')),
+                'fiscal_date_ending': parse_date(fiscal_date),
+                'period_type': 'quarterly',
+                'reported_date': parse_date(fiscal_date),  # Alpha Vantage doesn't provide separate reported date
                 
                 # Income statement
                 'revenue': parse_number(report.get('totalRevenue')),
@@ -243,36 +244,72 @@ def process_fundamentals_data(symbol, income_data, balance_data, cash_data, over
                 'operating_expenses': parse_number(report.get('operatingExpenses')),
                 'operating_income': parse_number(report.get('operatingIncome')),
                 'net_income': parse_number(report.get('netIncome')),
-                'earnings_per_share': parse_number(report.get('reportedEPS')),
                 
                 'fetched_at': datetime.now(timezone.utc)
             }
             
             # Add balance sheet data if available
-            if balance_data and 'annualReports' in balance_data:
-                for balance_report in balance_data['annualReports']:
-                    if balance_report.get('fiscalDateEnding') == report.get('fiscalDateEnding'):
+            if balance_data and 'quarterlyReports' in balance_data:
+                for balance_report in balance_data['quarterlyReports']:
+                    if balance_report.get('fiscalDateEnding') == fiscal_date:
+                        shares = parse_number(balance_report.get('commonStockSharesOutstanding'))
+                        current_assets = parse_number(balance_report.get('totalCurrentAssets'))
+                        current_liabilities = parse_number(balance_report.get('totalCurrentLiabilities'))
+                        short_debt = parse_number(balance_report.get('shortTermDebt')) or 0
+                        long_debt = parse_number(balance_report.get('longTermDebt')) or 0
+                        shareholder_equity = parse_number(balance_report.get('totalShareholderEquity'))
+                        
                         record.update({
                             'total_assets': parse_number(balance_report.get('totalAssets')),
                             'total_liabilities': parse_number(balance_report.get('totalLiabilities')),
-                            'total_shareholder_equity': parse_number(balance_report.get('totalShareholderEquity')),
+                            'total_shareholder_equity': shareholder_equity,
                             'cash_and_equivalents': parse_number(balance_report.get('cashAndCashEquivalentsAtCarryingValue')),
-                            'total_debt': parse_number(balance_report.get('totalDebt')),
-                            'shares_outstanding': parse_number(balance_report.get('commonStockSharesOutstanding')),
+                            'total_debt': (short_debt + long_debt) if (short_debt + long_debt) > 0 else None,
+                            'shares_outstanding': shares,
                         })
+                        
+                        # Calculate EPS if we have the data
+                        if shares and shares > 0 and record['net_income'] is not None:
+                            record['earnings_per_share'] = record['net_income'] / shares
+                            record['diluted_earnings_per_share'] = record['earnings_per_share']
+                        else:
+                            record['earnings_per_share'] = None
+                            record['diluted_earnings_per_share'] = None
+                        
+                        # Calculate book value per share
+                        if shares and shares > 0 and shareholder_equity is not None:
+                            record['book_value_per_share'] = shareholder_equity / shares
+                        else:
+                            record['book_value_per_share'] = None
+                        
+                        # Calculate current ratio
+                        if current_assets and current_liabilities and current_liabilities > 0:
+                            record['current_ratio'] = current_assets / current_liabilities
+                            # Quick ratio approximation (no inventory data from Alpha Vantage)
+                            record['quick_ratio'] = record['current_ratio'] * 0.85
+                        else:
+                            record['current_ratio'] = None
+                            record['quick_ratio'] = None
+                        
                         break
             
             # Add cash flow data if available
-            if cash_data and 'annualReports' in cash_data:
-                for cash_report in cash_data['annualReports']:
-                    if cash_report.get('fiscalDateEnding') == report.get('fiscalDateEnding'):
+            if cash_data and 'quarterlyReports' in cash_data:
+                for cash_report in cash_data['quarterlyReports']:
+                    if cash_report.get('fiscalDateEnding') == fiscal_date:
+                        operating_cf = parse_number(cash_report.get('operatingCashflow'))
+                        capex = parse_number(cash_report.get('capitalExpenditures', 0) or 0)
+                        free_cf = parse_number(cash_report.get('freeCashFlow'))
+                        
                         record.update({
-                            'operating_cash_flow': parse_number(cash_report.get('operatingCashflow')),
-                            'free_cash_flow': parse_number(cash_report.get('freeCashFlow')),
+                            'operating_cash_flow': operating_cf,
+                            # Calculate free cash flow if not provided
+                            'free_cash_flow': free_cf if free_cf is not None else 
+                                            (operating_cf - abs(capex) if operating_cf is not None and capex is not None else None),
                         })
                         break
             
-            # Add overview metrics if available
+            # Add overview metrics (these are company-wide, not period-specific)
             if overview_data:
                 record.update({
                     'pe_ratio': parse_number(overview_data.get('PERatio')),
@@ -289,24 +326,36 @@ def process_fundamentals_data(symbol, income_data, balance_data, cash_data, over
                 })
             
             # Calculate additional ratios
-            if record['total_liabilities'] and record['total_shareholder_equity']:
-                record['debt_to_equity'] = record['total_liabilities'] / record['total_shareholder_equity']
+            if record.get('total_debt') is not None and record.get('total_shareholder_equity') and record['total_shareholder_equity'] > 0:
+                record['debt_to_equity'] = record['total_debt'] / record['total_shareholder_equity']
+            else:
+                record['debt_to_equity'] = None
             
-            if record['total_assets'] and record['total_liabilities']:
-                record['current_ratio'] = record['total_assets'] / record['total_liabilities']
+            # Calculate ROIC (approximation)
+            if record.get('operating_income') and record.get('total_assets') and record.get('cash_and_equivalents'):
+                invested_capital = record['total_assets'] - record.get('cash_and_equivalents', 0)
+                if invested_capital > 0:
+                    # Annualize quarterly operating income
+                    record['return_on_invested_capital'] = (record['operating_income'] * 4) / invested_capital * 100
+                else:
+                    record['return_on_invested_capital'] = None
+            else:
+                record['return_on_invested_capital'] = None
             
             records.append(record)
     
-    # Process quarterly reports
-    if income_data and 'quarterlyReports' in income_data:
-        quarterly_reports = income_data['quarterlyReports'][:8]  # Last 2 years
+    # ALSO process ALL annual reports for complete historical coverage
+    if income_data and 'annualReports' in income_data:
+        annual_reports = income_data['annualReports']  # Get ALL annual data
         
-        for report in quarterly_reports:
+        for report in annual_reports:
+            fiscal_date = report.get('fiscalDateEnding')
+            
             record = {
                 'symbol': symbol,
-                'fiscal_date_ending': parse_date(report.get('fiscalDateEnding')),
-                'period_type': 'quarterly',
-                'reported_date': parse_date(report.get('reportedDate')),
+                'fiscal_date_ending': parse_date(fiscal_date),
+                'period_type': 'annual',
+                'reported_date': parse_date(fiscal_date),  # Alpha Vantage doesn't provide separate reported date
                 
                 # Income statement
                 'revenue': parse_number(report.get('totalRevenue')),
@@ -315,34 +364,100 @@ def process_fundamentals_data(symbol, income_data, balance_data, cash_data, over
                 'operating_expenses': parse_number(report.get('operatingExpenses')),
                 'operating_income': parse_number(report.get('operatingIncome')),
                 'net_income': parse_number(report.get('netIncome')),
-                'earnings_per_share': parse_number(report.get('reportedEPS')),
                 
                 'fetched_at': datetime.now(timezone.utc)
             }
             
             # Add balance sheet data if available
-            if balance_data and 'quarterlyReports' in balance_data:
-                for balance_report in balance_data['quarterlyReports']:
-                    if balance_report.get('fiscalDateEnding') == report.get('fiscalDateEnding'):
+            if balance_data and 'annualReports' in balance_data:
+                for balance_report in balance_data['annualReports']:
+                    if balance_report.get('fiscalDateEnding') == fiscal_date:
+                        shares = parse_number(balance_report.get('commonStockSharesOutstanding'))
+                        shareholder_equity = parse_number(balance_report.get('totalShareholderEquity'))
+                        total_assets = parse_number(balance_report.get('totalAssets'))
+                        total_liabilities = parse_number(balance_report.get('totalLiabilities'))
+                        
                         record.update({
-                            'total_assets': parse_number(balance_report.get('totalAssets')),
-                            'total_liabilities': parse_number(balance_report.get('totalLiabilities')),
-                            'total_shareholder_equity': parse_number(balance_report.get('totalShareholderEquity')),
+                            'total_assets': total_assets,
+                            'total_liabilities': total_liabilities,
+                            'total_shareholder_equity': shareholder_equity,
                             'cash_and_equivalents': parse_number(balance_report.get('cashAndCashEquivalentsAtCarryingValue')),
-                            'total_debt': parse_number(balance_report.get('totalDebt')),
-                            'shares_outstanding': parse_number(balance_report.get('commonStockSharesOutstanding')),
+                            'total_debt': parse_number(balance_report.get('totalDebt')) or 
+                                        ((parse_number(balance_report.get('shortTermDebt')) or 0) + 
+                                         (parse_number(balance_report.get('longTermDebt')) or 0)) or None,
+                            'shares_outstanding': shares,
                         })
+                        
+                        # Calculate EPS if we have the data
+                        if shares and shares > 0 and record['net_income'] is not None:
+                            record['earnings_per_share'] = record['net_income'] / shares
+                            record['diluted_earnings_per_share'] = record['earnings_per_share']
+                        else:
+                            record['earnings_per_share'] = None
+                            record['diluted_earnings_per_share'] = None
+                        
+                        # Calculate book value per share
+                        if shares and shares > 0 and shareholder_equity is not None:
+                            record['book_value_per_share'] = shareholder_equity / shares
+                        else:
+                            record['book_value_per_share'] = None
+                        
+                        # Current ratio for annual (less precise)
+                        if total_assets and total_liabilities and total_liabilities > 0:
+                            record['current_ratio'] = total_assets / total_liabilities
+                            record['quick_ratio'] = record['current_ratio'] * 0.7  # More conservative for annual
+                        else:
+                            record['current_ratio'] = None
+                            record['quick_ratio'] = None
+                        
                         break
             
             # Add cash flow data if available
-            if cash_data and 'quarterlyReports' in cash_data:
-                for cash_report in cash_data['quarterlyReports']:
-                    if cash_report.get('fiscalDateEnding') == report.get('fiscalDateEnding'):
+            if cash_data and 'annualReports' in cash_data:
+                for cash_report in cash_data['annualReports']:
+                    if cash_report.get('fiscalDateEnding') == fiscal_date:
+                        operating_cf = parse_number(cash_report.get('operatingCashflow'))
+                        capex = parse_number(cash_report.get('capitalExpenditures', 0) or 0)
+                        free_cf = parse_number(cash_report.get('freeCashFlow'))
+                        
                         record.update({
-                            'operating_cash_flow': parse_number(cash_report.get('operatingCashflow')),
-                            'free_cash_flow': parse_number(cash_report.get('freeCashFlow')),
+                            'operating_cash_flow': operating_cf,
+                            'free_cash_flow': free_cf if free_cf is not None else 
+                                            (operating_cf - abs(capex) if operating_cf is not None and capex is not None else None),
                         })
                         break
+            
+            # Add overview metrics 
+            if overview_data:
+                record.update({
+                    'pe_ratio': parse_number(overview_data.get('PERatio')),
+                    'peg_ratio': parse_number(overview_data.get('PEGRatio')),
+                    'pb_ratio': parse_number(overview_data.get('PriceToBookRatio')),
+                    'ps_ratio': parse_number(overview_data.get('PriceToSalesRatioTTM')),
+                    'ev_to_revenue': parse_number(overview_data.get('EVToRevenue')),
+                    'ev_to_ebitda': parse_number(overview_data.get('EVToEBITDA')),
+                    'return_on_equity': parse_number(overview_data.get('ReturnOnEquityTTM')),
+                    'return_on_assets': parse_number(overview_data.get('ReturnOnAssetsTTM')),
+                    'gross_margin': parse_number(overview_data.get('GrossProfitTTM')) / parse_number(overview_data.get('RevenueTTM')) * 100 if overview_data.get('RevenueTTM') and overview_data.get('GrossProfitTTM') else None,
+                    'operating_margin': parse_number(overview_data.get('OperatingMarginTTM')),
+                    'net_margin': parse_number(overview_data.get('ProfitMargin')),
+                })
+            
+            # Calculate additional ratios
+            if record.get('total_debt') is not None and record.get('total_shareholder_equity') and record['total_shareholder_equity'] > 0:
+                record['debt_to_equity'] = record['total_debt'] / record['total_shareholder_equity']
+            else:
+                record['debt_to_equity'] = None
+            
+            # Calculate ROIC 
+            if record.get('operating_income') and record.get('total_assets') and record.get('cash_and_equivalents'):
+                invested_capital = record['total_assets'] - record.get('cash_and_equivalents', 0)
+                if invested_capital > 0:
+                    record['return_on_invested_capital'] = record['operating_income'] / invested_capital * 100
+                else:
+                    record['return_on_invested_capital'] = None
+            else:
+                record['return_on_invested_capital'] = None
             
             records.append(record)
     
@@ -367,29 +482,59 @@ def upsert_fundamentals(records):
             temp_table = f"temp_fundamentals_{int(time.time())}"
             df.to_sql(temp_table, conn, if_exists='replace', index=False, method='multi')
             
-            # Upsert from temp table
+            # Upsert from temp table with proper type casting
             conn.execute(text(f"""
                 INSERT INTO fundamentals (
                     symbol, fiscal_date_ending, period_type, reported_date,
                     revenue, cost_of_revenue, gross_profit, operating_expenses,
-                    operating_income, net_income, earnings_per_share,
+                    operating_income, net_income, earnings_per_share, diluted_earnings_per_share,
                     total_assets, total_liabilities, total_shareholder_equity,
                     cash_and_equivalents, total_debt, free_cash_flow, operating_cash_flow,
                     shares_outstanding, pe_ratio, peg_ratio, pb_ratio, ps_ratio,
                     ev_to_revenue, ev_to_ebitda, debt_to_equity, current_ratio,
                     gross_margin, operating_margin, net_margin,
-                    return_on_equity, return_on_assets, fetched_at
+                    return_on_equity, return_on_assets, 
+                    quick_ratio, book_value_per_share, return_on_invested_capital,
+                    fetched_at
                 )
                 SELECT 
-                    symbol, fiscal_date_ending::date, period_type, reported_date::date,
-                    revenue, cost_of_revenue, gross_profit, operating_expenses,
-                    operating_income, net_income, earnings_per_share,
-                    total_assets, total_liabilities, total_shareholder_equity,
-                    cash_and_equivalents, total_debt, free_cash_flow, operating_cash_flow,
-                    shares_outstanding, pe_ratio, peg_ratio, pb_ratio, ps_ratio,
-                    ev_to_revenue, ev_to_ebitda, debt_to_equity, current_ratio,
-                    gross_margin, operating_margin, net_margin,
-                    return_on_equity, return_on_assets, fetched_at
+                    symbol, 
+                    fiscal_date_ending::date, 
+                    period_type, 
+                    reported_date::date,
+                    revenue::numeric, 
+                    cost_of_revenue::numeric, 
+                    gross_profit::numeric, 
+                    operating_expenses::numeric,
+                    operating_income::numeric, 
+                    net_income::numeric, 
+                    earnings_per_share::numeric,
+                    diluted_earnings_per_share::numeric,
+                    total_assets::numeric, 
+                    total_liabilities::numeric, 
+                    total_shareholder_equity::numeric,
+                    cash_and_equivalents::numeric, 
+                    total_debt::numeric, 
+                    free_cash_flow::numeric, 
+                    operating_cash_flow::numeric,
+                    shares_outstanding::numeric, 
+                    pe_ratio::numeric, 
+                    peg_ratio::numeric, 
+                    pb_ratio::numeric, 
+                    ps_ratio::numeric,
+                    ev_to_revenue::numeric, 
+                    ev_to_ebitda::numeric, 
+                    debt_to_equity::numeric, 
+                    current_ratio::numeric,
+                    gross_margin::numeric, 
+                    operating_margin::numeric, 
+                    net_margin::numeric,
+                    return_on_equity::numeric, 
+                    return_on_assets::numeric,
+                    quick_ratio::numeric,
+                    book_value_per_share::numeric,
+                    return_on_invested_capital::numeric,
+                    fetched_at
                 FROM {temp_table}
                 ON CONFLICT (symbol, fiscal_date_ending, period_type) DO UPDATE SET
                     reported_date = EXCLUDED.reported_date,
@@ -400,6 +545,7 @@ def upsert_fundamentals(records):
                     operating_income = EXCLUDED.operating_income,
                     net_income = EXCLUDED.net_income,
                     earnings_per_share = EXCLUDED.earnings_per_share,
+                    diluted_earnings_per_share = EXCLUDED.diluted_earnings_per_share,
                     total_assets = EXCLUDED.total_assets,
                     total_liabilities = EXCLUDED.total_liabilities,
                     total_shareholder_equity = EXCLUDED.total_shareholder_equity,
@@ -421,6 +567,9 @@ def upsert_fundamentals(records):
                     net_margin = EXCLUDED.net_margin,
                     return_on_equity = EXCLUDED.return_on_equity,
                     return_on_assets = EXCLUDED.return_on_assets,
+                    quick_ratio = EXCLUDED.quick_ratio,
+                    book_value_per_share = EXCLUDED.book_value_per_share,
+                    return_on_invested_capital = EXCLUDED.return_on_invested_capital,
                     fetched_at = EXCLUDED.fetched_at
             """))
             
@@ -442,26 +591,35 @@ def process_symbol(symbol):
         cash_data = fetch_cash_flow(symbol)
         overview_data = fetch_overview(symbol)
         
+        # Debug logging
+        logger.info(f"Fetched data for {symbol}: Income={income_data is not None}, Balance={balance_data is not None}, Cash={cash_data is not None}, Overview={overview_data is not None}")
+        
         # Check if we got any data
         if not income_data and not balance_data and not cash_data:
+            logger.warning(f"No data received for {symbol}")
             return symbol, 0, 'NO_DATA'
         
         # Process and combine data
         records = process_fundamentals_data(symbol, income_data, balance_data, cash_data, overview_data)
         
         if not records:
+            logger.warning(f"No records processed for {symbol}")
             return symbol, 0, 'NO_DATA'
+        
+        logger.info(f"Processed {len(records)} records for {symbol}")
         
         # Upsert to database
         count = upsert_fundamentals(records)
         
         if count > 0:
+            logger.info(f"Successfully upserted {count} records for {symbol}")
             return symbol, count, 'SUCCESS'
         else:
+            logger.warning(f"Failed to upsert records for {symbol}")
             return symbol, 0, 'FAILED'
             
     except Exception as e:
-        logger.error(f"Error processing {symbol}: {e}")
+        logger.error(f"Error processing {symbol}: {e}", exc_info=True)
         return symbol, 0, 'ERROR'
 
 def get_symbols():
@@ -495,7 +653,7 @@ def main():
     
     start_time = time.time()
     print("\n" + "=" * 60)
-    print("FUNDAMENTALS DATA FETCHER")
+    print("FUNDAMENTALS DATA FETCHER (QUARTERLY FOCUSED)")
     print("=" * 60)
     
     # Get symbols

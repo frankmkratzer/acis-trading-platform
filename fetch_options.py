@@ -76,7 +76,7 @@ def rate_limited_get(url, params, timeout=20):
 def get_active_symbols():
     """Get symbols that have options (typically liquid stocks and ETFs)"""
     query = text("""
-        SELECT DISTINCT s.symbol 
+        SELECT s.symbol, s.market_cap
         FROM symbol_universe s
         WHERE s.is_etf = TRUE  -- ETFs typically have options
            OR s.market_cap > 10000000000  -- Large cap stocks
@@ -93,7 +93,7 @@ def get_active_symbols():
     
     with engine.connect() as conn:
         result = conn.execute(query, {"limit": limit})
-        symbols = [row[0] for row in result]
+        symbols = [row[0] for row in result]  # row[0] is symbol, row[1] is market_cap
     
     logger.info(f"Found {len(symbols)} symbols with likely options activity")
     return symbols
