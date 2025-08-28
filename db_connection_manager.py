@@ -40,7 +40,7 @@ class DatabaseConnectionManager:
         """Get or create a database engine with connection pooling"""
         if self._engine is None:
             if database_url is None:
-                database_url = os.getenv("POSTGRES_URL")
+                database_url = os.getenv("POSTGRES_URL") or os.getenv("POSTGRES_DATABASE_URL")
                 if not database_url:
                     raise ValueError("Database URL not provided and POSTGRES_URL not set")
             

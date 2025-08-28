@@ -117,8 +117,8 @@ def is_valid_us_stock(row):
     exchange = str(row.get('exchange', '')).strip().upper()
     asset_type = str(row.get('assettype', '')).strip()
     
-    # Basic validation
-    if not symbol or len(symbol) > 5 or not symbol.isalpha():
+    # Basic validation - check for null, nan, or empty symbols
+    if not symbol or symbol == 'NAN' or symbol == 'NONE' or len(symbol) > 5 or not symbol.isalpha():
         return False
     
     # Check exchange
@@ -178,13 +178,19 @@ def update_symbol_universe(df):
             # Prepare data for upsert
             symbols_data = []
             for _, row in df.iterrows():
+                symbol = str(row.get('symbol', '')).strip()
+                # Skip rows without valid symbols
+                if not symbol:
+                    logger.warning(f"Skipping row with empty symbol: {row.get('name', 'Unknown')}")
+                    continue
+                    
                 symbols_data.append({
-                    'symbol': row['symbol'],
-                    'company_name': str(row.get('name', '')).strip()[:200] or None,  # Limit length
+                    'symbol': symbol,
+                    'name': str(row.get('name', '')).strip()[:200] or 'Unknown Company',  # Provide default name
                     'exchange': row.get('exchange', 'UNKNOWN'),
+                    'security_type': 'Common Stock',  # Default to Common Stock for US stocks
                     'is_etf': False,
-                    'is_active': True,
-                    'country': 'US',
+                    'country': 'USA',  # Changed from 'US' to 'USA' to match check constraint
                     'currency': 'USD'
                 })
             
@@ -197,31 +203,23 @@ def update_symbol_universe(df):
             # Ultra-fast upsert
             result = conn.execute(text(f"""
                 INSERT INTO symbol_universe (
-                    symbol, company_name, exchange, is_etf, is_active, country, currency,
-                    created_at, updated_at
+                    symbol, name, exchange, security_type, is_etf, country, currency, fetched_at
                 )
                 SELECT 
-                    symbol, company_name, exchange, is_etf, is_active, country, currency,
-                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    symbol, name, exchange, security_type, is_etf, country, currency, CURRENT_TIMESTAMP
                 FROM {temp_table}
                 ON CONFLICT (symbol) DO UPDATE SET
-                    company_name = EXCLUDED.company_name,
+                    name = EXCLUDED.name,
                     exchange = EXCLUDED.exchange,
-                    is_active = EXCLUDED.is_active,
-                    updated_at = CURRENT_TIMESTAMP
+                    security_type = EXCLUDED.security_type,
+                    fetched_at = CURRENT_TIMESTAMP
                 RETURNING symbol
             """))
             
             upserted_count = len(result.fetchall())
             
-            # Mark symbols not in our fresh list as inactive
-            conn.execute(text(f"""
-                UPDATE symbol_universe 
-                SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                WHERE symbol NOT IN (SELECT symbol FROM {temp_table})
-                  AND is_etf = FALSE
-                  AND country = 'US'
-            """))
+            # Note: Skipping inactive marking since is_active column doesn't exist
+            # This would normally mark symbols not in our fresh list as inactive
             
             # Drop temp table
             conn.execute(text(f"DROP TABLE {temp_table}"))
@@ -229,20 +227,16 @@ def update_symbol_universe(df):
             # Get final counts
             result = conn.execute(text("""
                 SELECT 
-                    COUNT(*) FILTER (WHERE is_active = TRUE) as active_count,
-                    COUNT(*) FILTER (WHERE is_active = FALSE) as inactive_count,
                     COUNT(*) as total_count
                 FROM symbol_universe 
-                WHERE is_etf = FALSE AND country = 'US'
+                WHERE is_etf = FALSE AND country = 'USA'
             """))
             
             counts = result.fetchone()
             
             logger.info(f"Symbol universe updated:")
             logger.info(f"  Upserted: {upserted_count} symbols")
-            logger.info(f"  Active US stocks: {counts[0]}")
-            logger.info(f"  Inactive US stocks: {counts[1]}")
-            logger.info(f"  Total US stocks: {counts[2]}")
+            logger.info(f"  Total US stocks: {counts[0]}")
             
             return True
             

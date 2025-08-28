@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # File: fetch_prices.py
-# Purpose: Fetch EOD daily adjusted prices (20y+ + incremental) with smooth global rate limiting and robust retries
+# Purpose: Fetch EOD daily adjusted prices with smart rate limiting
+# Optimized for 600 calls/min Premium API
 
 import os
 import time
-import math
 import random
 import logging
 import threading
@@ -14,297 +14,289 @@ from sqlalchemy import create_engine, text
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from reliability_manager import (
-    retry_with_backoff, log_errors, validate_price_data, 
-    with_circuit_breaker, log_script_health, get_memory_usage
-)
+from tqdm import tqdm
 
 # ─── Config ─────────────────────────────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 POSTGRES_URL = os.getenv("POSTGRES_URL")
 
-# Use optimized connection pooling
-from db_connection_manager import get_db_engine
-engine = get_db_engine(POSTGRES_URL)
+if not API_KEY:
+    print("[ERROR] ALPHA_VANTAGE_API_KEY not set in .env file")
+    exit(1)
 
+if not POSTGRES_URL:
+    print("[ERROR] POSTGRES_URL not set in .env file") 
+    exit(1)
+
+engine = create_engine(POSTGRES_URL)
 AV_URL = "https://www.alphavantage.co/query"
 
-# Rate limits (use headroom below hard cap to avoid drift)
-MAX_CALLS_PER_MIN = int(os.getenv("AV_MAX_CALLS_PER_MIN", "600"))
-HEADROOM_PCT = float(os.getenv("AV_HEADROOM_PCT", "0.98"))      # 98% of cap by default
-EFFECTIVE_LIMIT = max(1, int(math.floor(MAX_CALLS_PER_MIN * HEADROOM_PCT)))  # e.g., 588/min
-TOKENS_PER_SEC = EFFECTIVE_LIMIT / 60.0
-BUCKET_CAPACITY = int(os.getenv("AV_BUCKET_CAPACITY", str(max(5, EFFECTIVE_LIMIT // 6))))  # small burst allowance
-MAX_WORKERS = int(os.getenv("AV_MAX_WORKERS", "4"))
-RETRY_LIMIT = int(os.getenv("AV_RETRY_LIMIT", "3"))
-VERBOSE_RATE = os.getenv("AV_VERBOSE_RATE", "0").lower() in ("1", "true", "yes")
+# Rate limiting - 600 calls/min = 10 calls/sec
+MAX_WORKERS = 8  # Number of parallel threads
+CALLS_PER_MIN = 580  # Slightly below 600 for safety
+MIN_INTERVAL = 60.0 / CALLS_PER_MIN  # Minimum seconds between calls
 
 # ─── Logging ────────────────────────────────────────────────────
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
-    filename="fetch_prices.log",
+    filename="logs/fetch_prices.log",
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("fetch_prices")
 
-# ─── HTTP session with retries ──────────────────────────────────
-session = requests.Session()
-retry = Retry(
-    total=3,
-    backoff_factor=0.5,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET"],
-    raise_on_status=False,
-)
-adapter = HTTPAdapter(max_retries=retry, pool_maxsize=MAX_WORKERS * 2)
-session.mount("https://", adapter)
-session.mount("http://", adapter)
-
-# ─── Token Bucket Limiter ───────────────────────────────────────
-class TokenBucket:
-    def __init__(self, rate_per_sec: float, capacity: int):
-        self.rate = rate_per_sec
-        self.capacity = capacity
-        self.tokens = float(capacity)
-        self.last = time.monotonic()
-        self.lock = threading.Lock()
-
-    def acquire(self, tokens: float = 1.0):
-        """Block until 'tokens' are available (global & thread-safe)."""
-        while True:
-            with self.lock:
-                now = time.monotonic()
-                # refill
-                elapsed = now - self.last
-                if elapsed > 0:
-                    self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-                    self.last = now
-
-                if self.tokens >= tokens:
-                    self.tokens -= tokens
-                    if VERBOSE_RATE:
-                        log.info("Token granted. tokens=%.2f", self.tokens)
-                    break
-
-                # compute wait time needed, release lock while sleeping
-                need = tokens - self.tokens
-                wait = need / self.rate if self.rate > 0 else 0.2
-            # jitter to prevent thread herd
-            jitter = random.uniform(0.005, 0.02)
-            t = max(0.0, wait) + jitter
-            if VERBOSE_RATE:
-                log.info("Rate bucket empty, sleeping %.3fs", t)
-            time.sleep(t)
-
-rate_limiter = TokenBucket(TOKENS_PER_SEC, BUCKET_CAPACITY)
+# Simple rate limiter
+last_call_time = 0
+rate_limit_lock = threading.Lock()
 
 def rate_limited_get(url, params, timeout=20):
-    # Acquire one token per Alpha Vantage call
-    rate_limiter.acquire(1.0)
-    # tiny jitter so parallel threads don't align
-    time.sleep(random.uniform(0.0, 0.01))
-    return session.get(url, params=params, timeout=timeout)
+    """Rate-limited GET request"""
+    global last_call_time
+    
+    with rate_limit_lock:
+        current_time = time.time()
+        time_since_last = current_time - last_call_time
+        if time_since_last < MIN_INTERVAL:
+            sleep_time = MIN_INTERVAL - time_since_last
+            time.sleep(sleep_time)
+        last_call_time = time.time()
+    
+    return requests.get(url, params=params, timeout=timeout)
 
 # ─── DB helpers ─────────────────────────────────────────────────
 def get_latest_trade_date(symbol):
-    query = text("SELECT MAX(date) FROM stock_prices WHERE symbol = :symbol")
+    query = text("SELECT MAX(trade_date) FROM stock_prices WHERE symbol = :symbol")
     with engine.connect() as conn:
         return conn.execute(query, {"symbol": symbol}).scalar()
 
 def upsert_prices(df: pd.DataFrame):
     if df.empty:
         return
-    
-    # Use optimized batch processor for bulk upsert
-    from batch_processor import bulk_insert_prices
-    return bulk_insert_prices(df)
 
-# ─── Fetch Logic ────────────────────────────────────────────────
-@retry_with_backoff(max_retries=3)
-@with_circuit_breaker('alpha_vantage')
-@log_errors('fetch_prices')
-def fetch_price_data(symbol, outputsize="full"):
-    for attempt in range(1, RETRY_LIMIT + 1):
-        try:
-            params = {
-                "function": "TIME_SERIES_DAILY_ADJUSTED",
+    
+    # Use pandas to_sql with temp table for bulk upsert
+    with engine.begin() as conn:
+        # Create temp table
+        temp_table = f"temp_prices_{int(time.time())}"
+        df.to_sql(temp_table, conn, if_exists='replace', index=False, method='multi')
+        
+        # Upsert from temp table with proper date casting
+        conn.execute(text(f"""
+            INSERT INTO stock_prices (symbol, trade_date, open, high, low, 
+                                    close, adjusted_close, volume, dividend_amount, 
+                                    split_coefficient, fetched_at)
+            SELECT symbol, trade_date::date, open, high, low, 
+                   close, adjusted_close, volume, dividend_amount,
+                   split_coefficient, fetched_at
+            FROM {temp_table}
+            ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                open = EXCLUDED.open,
+                high = EXCLUDED.high,
+                low = EXCLUDED.low,
+                close = EXCLUDED.close,
+                adjusted_close = EXCLUDED.adjusted_close,
+                volume = EXCLUDED.volume,
+                dividend_amount = EXCLUDED.dividend_amount,
+                split_coefficient = EXCLUDED.split_coefficient,
+                fetched_at = EXCLUDED.fetched_at
+        """))
+        
+        # Drop temp table
+        conn.execute(text(f"DROP TABLE {temp_table}"))
+
+def fetch_price_data(symbol, outputsize="compact"):
+    """Fetch price data for a symbol"""
+    try:
+        params = {
+            "function": "TIME_SERIES_DAILY_ADJUSTED",
+            "symbol": symbol,
+            "apikey": API_KEY,
+            "outputsize": outputsize,
+            "datatype": "json",
+        }
+        
+        resp = rate_limited_get(AV_URL, params)
+        
+        if resp.status_code != 200:
+            log.warning(f"HTTP {resp.status_code} for {symbol}")
+            return None
+
+        raw = resp.json()
+        
+        # Check for rate limit or error messages
+        if "Note" in raw:
+            log.warning(f"API rate limit note for {symbol}: {raw['Note']}")
+            time.sleep(60)  # Wait a minute if rate limited
+            return None
+        
+        if "Information" in raw:
+            log.warning(f"API info for {symbol}: {raw['Information']}")
+            time.sleep(10)
+            return None
+            
+        if "Error Message" in raw:
+            log.warning(f"API error for {symbol}: {raw['Error Message']}")
+            return None
+
+        ts = raw.get("Time Series (Daily)")
+        if not ts:
+            log.info(f"No price data for {symbol}")
+            return None
+
+        records = []
+        for date_str, values in ts.items():
+            raw_close = float(values.get("4. close", 0) or 0)
+            raw_adjusted = float(values.get("5. adjusted close", 0) or 0)
+            
+            # Use close price if adjusted seems wrong
+            if raw_adjusted == 0 or (raw_close > 0 and (raw_adjusted / raw_close < 0.5 or raw_adjusted / raw_close > 2.0)):
+                adjusted_close = raw_close
+            else:
+                adjusted_close = raw_adjusted
+            
+            records.append({
                 "symbol": symbol,
-                "apikey": API_KEY,
-                "outputsize": outputsize,
-                "datatype": "json",
-            }
-            resp = rate_limited_get(AV_URL, params)
-            if resp.status_code != 200:
-                log.warning("HTTP %s for %s (attempt %d)", resp.status_code, symbol, attempt)
-                continue
+                "trade_date": date_str,
+                "open": float(values.get("1. open", 0) or 0),
+                "high": float(values.get("2. high", 0) or 0),
+                "low": float(values.get("3. low", 0) or 0),
+                "close": float(values.get("close", 0) or 0),
+                "adjusted_close": adjusted_close,
+                "volume": int(values.get("6. volume", 0) or 0),
+                "dividend_amount": float(values.get("7. dividend amount", 0) or 0),
+                "split_coefficient": float(values.get("8. split coefficient", 1) or 1),
+                "fetched_at": datetime.now(timezone.utc),
+            })
+        
+        return records
 
-            raw = resp.json()
-            # Alpha Vantage soft rate-limit or quota messages
-            if isinstance(raw, dict) and any(k in raw for k in ("Note", "Information", "Error Message")):
-                msg = raw.get("Note") or raw.get("Information") or raw.get("Error Message")
-                log.warning("AV message for %s: %s (attempt %d)", symbol, msg, attempt)
-                # backoff a bit more aggressively when server says slow down
-                time.sleep(min(2.0 * attempt, 6.0))
-                continue
+    except Exception as e:
+        log.exception(f"Error fetching {symbol}: {e}")
+        return None
 
-            ts = raw.get("Time Series (Daily)")
-            if not ts:
-                log.info("No price data for %s (attempt %d)", symbol, attempt)
-                return None
-
-            records = []
-            append = records.append
-            for date_str, values in ts.items():
-                append({
-                    "symbol": symbol,
-                    "trade_date": date_str,
-                    "open": float(values.get("1. open", 0) or 0),
-                    "high": float(values.get("2. high", 0) or 0),
-                    "low": float(values.get("3. low", 0) or 0),
-                    "close": float(values.get("4. close", 0) or 0),
-                    "adjusted_close": float(values.get("5. adjusted close", 0) or 0),
-                    "volume": int(values.get("6. volume", 0) or 0),
-                    "dividend_amount": float(values.get("7. dividend amount", 0) or 0),
-                    "split_coefficient": float(values.get("8. split coefficient", 1) or 1),
-                    "fetched_at": datetime.now(timezone.utc),
-                })
-            return records
-
-        except Exception as e:
-            log.exception("Error fetching %s on attempt %d: %s", symbol, attempt, e)
-            time.sleep(min(2 ** (attempt - 1), 8))  # exponential backoff
-
-    return None
-
-def process_symbol(symbol, force=False):
-    from incremental_fetch_manager import should_fetch_symbol, update_fetch_tracking
-    
-    # Check if we should fetch this symbol
-    should_fetch, reason = should_fetch_symbol('prices', symbol, force)
-    if not should_fetch:
-        print(f"⏭️  Skipping {symbol}: {reason}")
-        return 0
-    
+def process_symbol(symbol, pbar=None):
+    """Process a single symbol"""
     latest_date = get_latest_trade_date(symbol)
+    
+    # Use compact if we have data, full for new symbols
     outputsize = "compact" if latest_date else "full"
-    print(f"📈 Fetching {symbol} ({outputsize}) - {reason}")
+    
+    if pbar:
+        pbar.set_postfix({'symbol': symbol, 'mode': outputsize})
     
     try:
         records = fetch_price_data(symbol, outputsize=outputsize)
         if not records:
-            update_fetch_tracking('prices', symbol, status='NO_DATA')
-            return 0
+            return 0, 'NO_DATA'
         
         df = pd.DataFrame(records)
-
-        # If we already have data, trim to strictly newer dates to reduce DB IO
+        
+        # Filter to only new data if we have existing data
         if latest_date:
             df = df[pd.to_datetime(df["trade_date"]).dt.date > latest_date]
-
+        
         if not df.empty:
-            # Validate data quality before saving
-            is_valid, issues = validate_price_data(df)
-            if not is_valid:
-                print(f"⚠️  Data quality issues for {symbol}: {issues}")
-                # Still save but mark with quality issues
-                upsert_prices(df)
-                latest_data_date = pd.to_datetime(df["trade_date"]).dt.date.max()
-                update_fetch_tracking('prices', symbol, latest_data_date, len(df), 'SUCCESS_WITH_ISSUES')
-                print(f"⚠️  Saved {len(df)} rows for {symbol} (with quality issues)")
-                return len(df)
-            else:
-                upsert_prices(df)
-                # Get latest date from processed data for tracking
-                latest_data_date = pd.to_datetime(df["trade_date"]).dt.date.max()
-                update_fetch_tracking('prices', symbol, latest_data_date, len(df), 'SUCCESS')
-                print(f"✅ Saved {len(df)} rows for {symbol}")
-                return len(df)
+            upsert_prices(df)
+            return len(df), 'SUCCESS'
         else:
-            update_fetch_tracking('prices', symbol, latest_date, 0, 'NO_NEW_DATA')
-            print(f"ℹ️  No new data for {symbol}")
-            return 0
+            return 0, 'NO_NEW'
             
     except Exception as e:
-        update_fetch_tracking('prices', symbol, status='FAILED')
-        print(f"❌ Error processing {symbol}: {e}")
-        raise
+        log.error(f"Error processing {symbol}: {e}")
+        return 0, 'FAILED'
 
 def main():
-    from incremental_fetch_manager import get_symbols_needing_fetch
     import argparse
     
-    parser = argparse.ArgumentParser(description="Ultra-premium price fetcher with smart incremental logic")
-    parser.add_argument("--force", action="store_true", help="Force fetch all symbols regardless of previous fetches")
+    parser = argparse.ArgumentParser(description="Price fetcher optimized for 600 calls/min Premium API")
+    parser.add_argument("--symbols", nargs="+", help="Specific symbols to fetch")
+    parser.add_argument("--limit", type=int, help="Limit number of symbols to fetch")
+    parser.add_argument("--parallel", action="store_true", help="Use parallel processing (default: sequential)")
     args = parser.parse_args()
     
     start_time = time.time()
-    print("🚀 Ultra-Premium Price Fetcher Starting...")
+    print("[START] Price Fetcher Starting...")
     
-    all_symbols = pd.read_sql("SELECT symbol FROM symbol_universe WHERE is_active = TRUE", engine)["symbol"].tolist()
-    print(f"📊 Found {len(all_symbols)} active symbols in universe")
+    # Get symbols
+    if args.symbols:
+        symbols = args.symbols
+        print(f"[INFO] Fetching specific symbols: {symbols}")
+    else:
+        query = "SELECT symbol FROM symbol_universe WHERE is_etf = FALSE AND country = 'USA'"
+        if args.limit:
+            query += f" LIMIT {args.limit}"
+        symbols = pd.read_sql(query, engine)["symbol"].tolist()
+        print(f"[INFO] Found {len(symbols)} symbols to fetch")
     
-    # Get symbols that need fetching
-    symbols_to_fetch = get_symbols_needing_fetch('prices', all_symbols, args.force)
-    
-    if not symbols_to_fetch:
-        print("✅ All symbols are up to date - no fetching needed!")
+    if not symbols:
+        print("[ERROR] No symbols found")
         return
-    
-    print(f"📈 Will fetch {len(symbols_to_fetch)} symbols (skipped {len(all_symbols) - len(symbols_to_fetch)})")
-    
-    # Extract just the symbols for processing
-    symbols = [symbol for symbol, reason in symbols_to_fetch]
     
     # Small random shuffle to avoid the same symbols always hitting at minute boundaries
     random.shuffle(symbols)
     
     total_records = 0
-    successful_symbols = 0
-    failed_symbols = 0
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_symbol, s, args.force): s for s in symbols}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                records = fut.result()
-                if records > 0:
-                    successful_symbols += 1
-                    total_records += records
-                else:
-                    # Still count as successful if no new data
-                    successful_symbols += 1
-            except Exception as e:
-                log.exception("Uncaught error processing %s: %s", sym, e)
-                print(f"❌ Error processing {sym}: {e}")
-                failed_symbols += 1
+    status_counts = {'SUCCESS': 0, 'NO_DATA': 0, 'NO_NEW': 0, 'FAILED': 0}
     
-    # Log final health metrics
+    print("\n[PROGRESS] Processing symbols:")
+    
+    if args.parallel:
+        # Parallel processing with ThreadPoolExecutor
+        with tqdm(total=len(symbols), desc="Fetching prices", unit="symbol", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(process_symbol, s, pbar): s for s in symbols}
+                
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        records, status = fut.result()
+                        status_counts[status] += 1
+                        total_records += records
+                        
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            'Success': status_counts['SUCCESS'],
+                            'No_Data': status_counts['NO_DATA'],
+                            'No_New': status_counts['NO_NEW'],
+                            'Failed': status_counts['FAILED'],
+                            'Records': total_records
+                        })
+                        
+                    except Exception as e:
+                        log.exception(f"Uncaught error processing {sym}: {e}")
+                        status_counts['FAILED'] += 1
+                        pbar.update(1)
+    else:
+        # Sequential processing (default, more stable)
+        with tqdm(total=len(symbols), desc="Fetching prices", unit="symbol") as pbar:
+            for symbol in symbols:
+                records, status = process_symbol(symbol, pbar)
+                status_counts[status] += 1
+                total_records += records
+                
+                pbar.update(1)
+                pbar.set_postfix({
+                    'Success': status_counts['SUCCESS'],
+                    'No_Data': status_counts['NO_DATA'],
+                    'No_New': status_counts['NO_NEW'],
+                    'Failed': status_counts['FAILED'],
+                    'Records': total_records
+                })
+    
     duration = time.time() - start_time
-    memory_mb = get_memory_usage()
     
-    status = 'SUCCESS' if failed_symbols == 0 else 'PARTIAL_SUCCESS' if successful_symbols > 0 else 'FAILED'
-    
-    log_script_health(
-        script_name='fetch_prices',
-        status=status,
-        symbols_processed=successful_symbols,
-        symbols_failed=failed_symbols,
-        execution_time=duration,
-        memory_usage=memory_mb,
-        error_summary={'total_records': total_records, 'efficiency_skipped': len(all_symbols) - len(symbols_to_fetch)}
-    )
-    
-    print(f"\n🎯 PRICE FETCHING SUMMARY:")
-    print(f"   Symbols processed: {successful_symbols}")
-    print(f"   Symbols failed: {failed_symbols}") 
+    print(f"\n[SUMMARY] PRICE FETCHING SUMMARY:")
+    print(f"   Total symbols: {len(symbols)}")
+    print(f"   Successful: {status_counts['SUCCESS']}")
+    print(f"   No data: {status_counts['NO_DATA']}")
+    print(f"   No new data: {status_counts['NO_NEW']}")
+    print(f"   Failed: {status_counts['FAILED']}")
     print(f"   Total records: {total_records:,}")
     print(f"   Duration: {duration:.1f}s")
-    print(f"   Memory usage: {memory_mb:.1f}MB")
-    print(f"   Efficiency: Skipped {len(all_symbols) - len(symbols_to_fetch)} already-current symbols")
+    print(f"   Rate: {len(symbols)/duration:.2f} symbols/sec")
 
 if __name__ == "__main__":
     main()

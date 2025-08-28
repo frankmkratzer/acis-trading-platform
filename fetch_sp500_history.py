@@ -1,149 +1,240 @@
 #!/usr/bin/env python3
-# File: fetch_sp500_history.py
-# Purpose: Fetch full adjusted SPY price history into sp500_price_history table (safe upsert + schema guard)
+"""
+S&P 500 History Fetcher
+Fetches SPY ETF price history as proxy for S&P 500 index
+Optimized for 600 calls/min Premium API
+"""
 
 import os
+import sys
 import time
+import logging
+import threading
 import requests
 import pandas as pd
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from collections import deque
-import logging
 
-# ─── ENV SETUP ─────────────────────────────────────────────
+# Configuration
 load_dotenv()
 API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 POSTGRES_URL = os.getenv("POSTGRES_URL")
-engine = create_engine(POSTGRES_URL)
 
-# ─── Constants ─────────────────────────────────────────────
+if not API_KEY:
+    print("[ERROR] ALPHA_VANTAGE_API_KEY not set")
+    sys.exit(1)
+if not POSTGRES_URL:
+    print("[ERROR] POSTGRES_URL not set")
+    sys.exit(1)
+
+engine = create_engine(POSTGRES_URL)
 AV_URL = "https://www.alphavantage.co/query"
 SPY_SYMBOL = "SPY"
-MAX_CALLS_PER_MIN = 600
-RATE_WINDOW_SEC = 60
-RETRY_LIMIT = 3
 
-# ─── Logger ────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Rate limiting - 600 calls/min = 10 calls/sec
+CALLS_PER_MIN = 580  # Slightly below 600 for safety
+MIN_INTERVAL = 60.0 / CALLS_PER_MIN
+
+# Logging
+os.makedirs("logs", exist_ok=True)
+logging.basicConfig(
+    filename="logs/fetch_sp500_history.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("fetch_sp500_history")
 
-# ─── Rate Limiter ──────────────────────────────────────────
-request_times = deque(maxlen=MAX_CALLS_PER_MIN)
+# Simple rate limiter
+last_call_time = 0
+rate_limit_lock = threading.Lock()
 
-def rate_limited_request(url, params):
-    now = time.time()
-    while len(request_times) >= MAX_CALLS_PER_MIN and (now - request_times[0]) < RATE_WINDOW_SEC:
-        sleep_time = RATE_WINDOW_SEC - (now - request_times[0]) + 0.1
-        logger.info(f"⏳ Rate limit reached. Sleeping {sleep_time:.2f}s...")
-        time.sleep(sleep_time)
-        now = time.time()
-    request_times.append(now)
-    return requests.get(url, params=params, timeout=30)
+def rate_limited_get(url, params, timeout=30):
+    """Rate-limited GET request"""
+    global last_call_time
+    
+    with rate_limit_lock:
+        current_time = time.time()
+        time_since_last = current_time - last_call_time
+        if time_since_last < MIN_INTERVAL:
+            sleep_time = MIN_INTERVAL - time_since_last
+            time.sleep(sleep_time)
+        last_call_time = time.time()
+    
+    return requests.get(url, params=params, timeout=timeout)
 
-
-# ─── Freshness Check ───────────────────────────────────────
 def is_data_fresh():
+    """Check if we already have today's data"""
     query = text("SELECT MAX(trade_date)::date FROM sp500_price_history")
     with engine.connect() as conn:
         latest = conn.execute(query).scalar()
     if latest is None:
         return False
-    return latest >= datetime.now(timezone.utc).date()
+    # Consider data fresh if we have data from today or yesterday (markets closed)
+    from datetime import timedelta
+    return latest >= (datetime.now(timezone.utc).date() - timedelta(days=1))
 
-# ─── Fetch SPY Data ────────────────────────────────────────
 def fetch_spy_history():
-    for attempt in range(RETRY_LIMIT):
-        try:
-            params = {
-                "function": "TIME_SERIES_DAILY_ADJUSTED",
-                "symbol": SPY_SYMBOL,
-                "apikey": API_KEY,
-                "outputsize": "full",
-                "datatype": "json"
-            }
-            resp = rate_limited_request(AV_URL, params)
-            if resp.status_code != 200:
-                raise Exception(f"HTTP {resp.status_code}")
+    """Fetch SPY ETF history as proxy for S&P 500"""
+    params = {
+        "function": "TIME_SERIES_DAILY_ADJUSTED",
+        "symbol": SPY_SYMBOL,
+        "apikey": API_KEY,
+        "outputsize": "full",
+        "datatype": "json"
+    }
+    
+    try:
+        resp = rate_limited_get(AV_URL, params)
+        
+        if resp.status_code != 200:
+            logger.warning(f"HTTP {resp.status_code} for SPY")
+            return None
+        
+        raw = resp.json()
+        
+        # Check for rate limit or error messages
+        if "Note" in raw:
+            logger.warning(f"API rate limit note: {raw['Note']}")
+            time.sleep(60)  # Wait a minute if rate limited
+            return None
+        
+        if "Information" in raw:
+            logger.warning(f"API info: {raw['Information']}")
+            time.sleep(10)
+            return None
+            
+        if "Error Message" in raw:
+            logger.warning(f"API error: {raw['Error Message']}")
+            return None
+        
+        if "Time Series (Daily)" not in raw:
+            logger.error("Missing 'Time Series (Daily)' in response")
+            return None
+        
+        ts = raw["Time Series (Daily)"]
+        records = []
+        for date_str, values in ts.items():
+            # Use standard close if adjusted close is missing or zero
+            raw_close = float(values.get("4. close", 0) or 0)
+            raw_adjusted = float(values.get("5. adjusted close", 0) or 0)
+            
+            # Use close price if adjusted seems wrong
+            if raw_adjusted == 0 or (raw_close > 0 and (raw_adjusted / raw_close < 0.5 or raw_adjusted / raw_close > 2.0)):
+                adjusted_close = raw_close
+            else:
+                adjusted_close = raw_adjusted
+            
+            records.append({
+                "trade_date": pd.to_datetime(date_str).date(),
+                "open": float(values.get("1. open", 0) or 0),
+                "high": float(values.get("2. high", 0) or 0),
+                "low": float(values.get("3. low", 0) or 0),
+                "close": raw_close,
+                "adjusted_close": adjusted_close,
+                "volume": int(values.get("6. volume", 0) or 0),
+                "dividend_amount": float(values.get("7. dividend amount", 0) or 0),
+                "split_coefficient": float(values.get("8. split coefficient", 1) or 1),
+                "fetched_at": datetime.now(timezone.utc)
+            })
+        
+        df = pd.DataFrame(records).sort_values("trade_date")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error fetching SPY data: {e}")
+        return None
 
-            raw = resp.json()
-            if "Time Series (Daily)" not in raw:
-                raise ValueError("Missing 'Time Series (Daily)' in response")
-
-            ts = raw["Time Series (Daily)"]
-            records = []
-            for date_str, values in ts.items():
-                records.append({
-                    "trade_date": pd.to_datetime(date_str).date(),  # ensure DATE, not TIMESTAMP
-                    "open": float(values.get("1. open", 0)),
-                    "high": float(values.get("2. high", 0)),
-                    "low": float(values.get("3. low", 0)),
-                    "close": float(values.get("4. close", 0)),
-                    "adjusted_close": float(values.get("5. adjusted close", 0)),
-                    "volume": int(values.get("6. volume", 0)),
-                    "dividend_amount": float(values.get("7. dividend amount", 0)),
-                    "split_coefficient": float(values.get("8. split coefficient", 1)),
-                    "fetched_at": datetime.now(timezone.utc)
-                })
-            df = pd.DataFrame(records).sort_values("trade_date")
-            return df
-        except Exception as e:
-            logger.warning(f"⚠️ Attempt {attempt+1} failed: {e}")
-            time.sleep(2 ** attempt)
-    raise RuntimeError("❌ Failed to fetch SPY data after retries.")
-
-# ─── Upsert into typed table ───────────────────────────────
-def upsert_spy(df: pd.DataFrame):
+def upsert_spy_data(df: pd.DataFrame):
+    """Upsert SPY data to sp500_price_history table"""
     if df.empty:
-        return
-    with engine.begin() as conn:
-        temp_table = "temp_sp500_price_history"
-        df.to_sql(temp_table, conn, if_exists="replace", index=False, method="multi")
+        return 0
+    
+    try:
+        with engine.begin() as conn:
+            # Create temp table
+            temp_table = f"temp_sp500_{int(time.time())}"
+            df.to_sql(temp_table, conn, if_exists="replace", index=False, method="multi")
+            
+            # Upsert from temp table
+            conn.execute(text(f"""
+                INSERT INTO sp500_price_history (
+                    trade_date, open, high, low, close, adjusted_close,
+                    volume, dividend_amount, split_coefficient, fetched_at
+                )
+                SELECT
+                    trade_date::date,
+                    open, high, low, close, adjusted_close,
+                    volume, dividend_amount, split_coefficient, fetched_at
+                FROM {temp_table}
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    adjusted_close = EXCLUDED.adjusted_close,
+                    volume = EXCLUDED.volume,
+                    dividend_amount = EXCLUDED.dividend_amount,
+                    split_coefficient = EXCLUDED.split_coefficient,
+                    fetched_at = EXCLUDED.fetched_at
+            """))
+            
+            # Drop temp table
+            conn.execute(text(f"DROP TABLE {temp_table}"))
+            
+            return len(df)
+            
+    except Exception as e:
+        logger.error(f"Error upserting SPY data: {e}")
+        return 0
 
-        # Rely on UNIQUE index ux_sp500_trade_date for conflict target
-        conn.execute(text(f"""
-            INSERT INTO sp500_price_history (
-                trade_date, open, high, low, close, adjusted_close,
-                volume, dividend_amount, split_coefficient, fetched_at
-            )
-            SELECT
-                trade_date::date,
-                open::numeric,
-                high::numeric,
-                low::numeric,
-                close::numeric,
-                adjusted_close::numeric,
-                volume::bigint,
-                dividend_amount::numeric,
-                split_coefficient::numeric,
-                fetched_at
-            FROM {temp_table}
-            ON CONFLICT (trade_date) DO UPDATE SET
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                adjusted_close = EXCLUDED.adjusted_close,
-                volume = EXCLUDED.volume,
-                dividend_amount = EXCLUDED.dividend_amount,
-                split_coefficient = EXCLUDED.split_coefficient,
-                fetched_at = EXCLUDED.fetched_at;
-        """))
-        conn.execute(text(f"DROP TABLE IF EXISTS {temp_table}"))
-
-# ─── Main ──────────────────────────────────────────────────
 def main():
-
-
-    if is_data_fresh():
-        logger.info("✅ SPY data already up-to-date.")
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Fetch S&P 500 (SPY) price history")
+    parser.add_argument("--force", action="store_true", help="Force refresh even if data is fresh")
+    args = parser.parse_args()
+    
+    start_time = time.time()
+    print("\n" + "=" * 60)
+    print("S&P 500 HISTORY FETCHER")
+    print("=" * 60)
+    
+    # Check if data is already fresh
+    if not args.force and is_data_fresh():
+        print("[INFO] SPY data is already up-to-date")
+        logger.info("SPY data already fresh, skipping fetch")
         return
-
-    logger.info("📥 Fetching SPY daily adjusted history...")
+    
+    print("[INFO] Fetching SPY daily adjusted history...")
+    
+    # Fetch SPY data
     df = fetch_spy_history()
-    upsert_spy(df)
-    logger.info(f"✅ Upserted {len(df)} SPY rows into sp500_price_history")
+    
+    if df is None:
+        print("[ERROR] Failed to fetch SPY data")
+        sys.exit(1)
+    
+    print(f"[INFO] Retrieved {len(df)} historical records")
+    
+    # Get date range
+    min_date = df['trade_date'].min()
+    max_date = df['trade_date'].max()
+    print(f"[INFO] Date range: {min_date} to {max_date}")
+    
+    # Upsert to database
+    records = upsert_spy_data(df)
+    
+    if records > 0:
+        duration = time.time() - start_time
+        print(f"\n[SUCCESS] Upserted {records} SPY records to sp500_price_history")
+        print(f"[PERFORMANCE] Duration: {duration:.1f}s")
+        print(f"[PERFORMANCE] Rate: {records/duration:.0f} records/sec")
+        logger.info(f"Successfully upserted {records} SPY records in {duration:.1f}s")
+    else:
+        print("[ERROR] Failed to upsert SPY data")
+        logger.error("Failed to upsert SPY data to database")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

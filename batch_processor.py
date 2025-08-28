@@ -130,25 +130,25 @@ class BatchProcessor:
                     # Perform efficient upsert
                     cursor.execute("""
                         INSERT INTO stock_prices (
-                            symbol, date, open_price, high_price, low_price, 
-                            close_price, adjusted_close, volume, 
-                            dividend_amount, split_coefficient, created_at
+                            symbol, trade_date, open, high, low, 
+                            close, adjusted_close, volume, 
+                            dividend_amount, split_coefficient, fetched_at
                         )
                         SELECT 
                             symbol, trade_date, open, high, low, close,
                             adjusted_close, volume, dividend_amount, 
                             split_coefficient, fetched_at
                         FROM temp_prices
-                        ON CONFLICT (symbol, date) DO UPDATE SET
-                            open_price = EXCLUDED.open_price,
-                            high_price = EXCLUDED.high_price,
-                            low_price = EXCLUDED.low_price,
-                            close_price = EXCLUDED.close_price,
+                        ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                            open = EXCLUDED.open,
+                            high = EXCLUDED.high,
+                            low = EXCLUDED.low,
+                            close = EXCLUDED.close,
                             adjusted_close = EXCLUDED.adjusted_close,
                             volume = EXCLUDED.volume,
                             dividend_amount = EXCLUDED.dividend_amount,
                             split_coefficient = EXCLUDED.split_coefficient,
-                            created_at = EXCLUDED.created_at
+                            fetched_at = EXCLUDED.fetched_at
                     """)
                     
                     rows_affected = cursor.rowcount

@@ -62,29 +62,10 @@ def main():
     log_script_start(logger, "fetch_dividend_history", "Ultra-premium dividend history fetcher from stock_prices")
     
     try:
-        logger.info("Ensuring dividend_history table and indexes exist...")
+        # Table and indexes should already exist from setup_schema.py
+        logger.info("Using existing dividend_history table from schema...")
         
         with engine.begin() as conn:
-            # Ensure dividend_history table exists (should already exist from schema)
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS dividend_history (
-                    symbol TEXT NOT NULL,
-                    ex_date DATE NOT NULL,
-                    dividend NUMERIC,
-                    currency TEXT,
-                    fetched_at TIMESTAMP,
-                    PRIMARY KEY (symbol, ex_date)
-                );
-            """))
-            
-            # Ensure indexes exist
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_dividend_history_symbol ON dividend_history(symbol);
-            """))
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_dividend_history_ex_date ON dividend_history(ex_date);
-            """))
-            
             logger.info("Starting ultra-fast dividend data upsert from stock_prices...")
             
             # Execute the ultra-fast upsert

@@ -259,12 +259,12 @@ class DataValidator:
             with self.engine.connect() as conn:
                 result = conn.execute(text("""
                     SELECT 
-                        AVG(close_price) as avg_price,
-                        STDDEV(close_price) as std_price,
+                        AVG(close) as avg_price,
+                        STDDEV(close) as std_price,
                         AVG(volume) as avg_volume
                     FROM stock_prices
                     WHERE symbol = :symbol
-                    AND date >= CURRENT_DATE - INTERVAL '1 year'
+                    AND trade_date >= CURRENT_DATE - INTERVAL '1 year'
                 """), {"symbol": symbol})
                 
                 historical = result.fetchone()

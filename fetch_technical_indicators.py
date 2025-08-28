@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Ultra-Premium Technical Indicators Fetcher
-Optimized for 300 calls/min Alpha Vantage Premium API
-Uses local calculation for maximum efficiency and comprehensive coverage
+Technical Indicators Calculator
+Calculates technical indicators locally from price data
+Optimized for efficiency with batch processing
 """
 
 import os
@@ -15,12 +15,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 from tqdm import tqdm
-from reliability_manager import (
-    log_errors, log_script_health, get_memory_usage,
-    retry_with_backoff
-)
 
 # Load environment
 load_dotenv()
@@ -31,20 +26,21 @@ if not POSTGRES_URL:
 
 engine = create_engine(POSTGRES_URL)
 
-# Ultra-premium settings for 300 calls/min API key
+# Configuration
 MAX_WORKERS = int(os.getenv("TECH_THREADS", "8"))
 BATCH_SIZE = int(os.getenv("TECH_BATCH_SIZE", "500"))
-LOOKBACK_DAYS = int(os.getenv("TECH_LOOKBACK_DAYS", "500"))  # ~2 years for longest indicators
 
+# Logging
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
-    filename="fetch_technical_indicators.log",
+    filename="logs/fetch_technical_indicators.log",
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("fetch_technical_indicators")
 
 class TechnicalIndicatorsCalculator:
-    """Ultra-fast local technical indicators calculation"""
+    """Local technical indicators calculation"""
     
     @staticmethod
     def sma(data: pd.Series, period: int) -> pd.Series:
@@ -103,177 +99,144 @@ class TechnicalIndicatorsCalculator:
     
     @staticmethod
     def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-        """Average Directional Index (simplified version)"""
+        """Average Directional Index"""
         plus_dm = high.diff()
-        minus_dm = -low.diff()
+        minus_dm = low.diff()
         plus_dm[plus_dm < 0] = 0
-        minus_dm[minus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
         
-        tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        tr1 = pd.DataFrame(high - low)
+        tr2 = pd.DataFrame(abs(high - close.shift()))
+        tr3 = pd.DataFrame(abs(low - close.shift()))
+        frames = [tr1, tr2, tr3]
+        tr = pd.concat(frames, axis=1, join='inner').max(axis=1)
+        atr = tr.rolling(window=period).mean()
         
-        plus_di = 100 * (plus_dm.rolling(period).mean() / true_range.rolling(period).mean())
-        minus_di = 100 * (minus_dm.rolling(period).mean() / true_range.rolling(period).mean())
-        
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-        adx = dx.rolling(period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = abs(100 * (minus_dm.rolling(window=period).mean() / atr))
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        adx = dx.rolling(window=period).mean()
         return adx
     
     @staticmethod
     def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
         """On Balance Volume"""
-        obv_values = []
-        obv_current = 0
-        prev_close = None
-        
-        for i, (curr_close, vol) in enumerate(zip(close, volume)):
-            if prev_close is not None:
-                if curr_close > prev_close:
-                    obv_current += vol
-                elif curr_close < prev_close:
-                    obv_current -= vol
-            obv_values.append(obv_current)
-            prev_close = curr_close
-        
-        return pd.Series(obv_values, index=close.index)
+        return (np.sign(close.diff()) * volume).fillna(0).cumsum()
 
-def get_symbols_to_update(limit=None):
-    """Get symbols that need technical indicators"""
-    query = """
-    SELECT s.symbol 
-    FROM symbol_universe s
-    WHERE s.is_etf = FALSE
-    ORDER BY s.market_cap DESC NULLS LAST, s.symbol
-    """
-    
-    if limit:
-        query += f" LIMIT {limit}"
+def get_price_data(symbol: str, min_data_points: int = 200) -> pd.DataFrame:
+    """Fetch price data for a symbol"""
+    query = text("""
+        SELECT trade_date as date, open, high, low, 
+               close, adjusted_close, volume
+        FROM stock_prices
+        WHERE symbol = :symbol
+        ORDER BY trade_date ASC
+    """)
     
     with engine.connect() as conn:
-        result = conn.execute(text(query))
-        symbols = [row[0] for row in result]
+        df = pd.read_sql_query(query, conn, params={"symbol": symbol})
     
-    return symbols
-
-def get_price_data_for_symbol(symbol):
-    """Get price data for technical indicator calculation"""
-    cutoff_date = datetime.now().date() - timedelta(days=LOOKBACK_DAYS)
+    if len(df) < min_data_points:
+        logger.warning(f"Insufficient data for {symbol}: {len(df)} rows")
+        return pd.DataFrame()
     
-    query = """
-    SELECT trade_date, open_price, high_price, low_price, close_price, volume
-    FROM stock_prices 
-    WHERE symbol = :symbol 
-      AND trade_date >= :cutoff_date
-      AND close_price IS NOT NULL
-    ORDER BY trade_date
-    """
-    
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn, params={
-            'symbol': symbol, 
-            'cutoff_date': cutoff_date
-        })
-    
-    if df.empty:
-        return None
-    
-    df['trade_date'] = pd.to_datetime(df['trade_date'])
-    df.set_index('trade_date', inplace=True)
+    # Use adjusted_close for close price calculations
+    df['close'] = df['adjusted_close'].fillna(df['close'])
+    df.set_index('date', inplace=True)
     return df
 
-def calculate_all_indicators(symbol, price_data):
+def calculate_indicators(symbol: str) -> pd.DataFrame:
     """Calculate all technical indicators for a symbol"""
-    if price_data is None or len(price_data) < 200:  # Need enough data for 200-day SMA
-        return None
-    
-    close = price_data['close_price']
-    high = price_data['high_price']
-    low = price_data['low_price']
-    volume = price_data['volume']
-    
-    calc = TechnicalIndicatorsCalculator()
-    
-    # Calculate all indicators
-    indicators_df = pd.DataFrame(index=price_data.index)
-    indicators_df['symbol'] = symbol
-    indicators_df['date'] = indicators_df.index.date
-    
-    # Moving Averages
-    indicators_df['sma_20'] = calc.sma(close, 20)
-    indicators_df['sma_50'] = calc.sma(close, 50)
-    indicators_df['sma_200'] = calc.sma(close, 200)
-    indicators_df['ema_12'] = calc.ema(close, 12)
-    indicators_df['ema_26'] = calc.ema(close, 26)
-    
-    # Oscillators
-    indicators_df['rsi_14'] = calc.rsi(close, 14)
-    
-    # MACD
-    macd, macd_signal, macd_hist = calc.macd(close)
-    indicators_df['macd'] = macd
-    indicators_df['macd_signal'] = macd_signal
-    indicators_df['macd_histogram'] = macd_hist
-    
-    # Bollinger Bands
-    bb_upper, bb_middle, bb_lower = calc.bollinger_bands(close)
-    indicators_df['bb_upper'] = bb_upper
-    indicators_df['bb_middle'] = bb_middle
-    indicators_df['bb_lower'] = bb_lower
-    
-    # Stochastic
-    stoch_k, stoch_d = calc.stochastic(high, low, close)
-    indicators_df['stoch_k'] = stoch_k
-    indicators_df['stoch_d'] = stoch_d
-    
-    # Other indicators
-    indicators_df['williams_r'] = calc.williams_r(high, low, close)
-    indicators_df['adx'] = calc.adx(high, low, close)
-    indicators_df['obv'] = calc.obv(close, volume).astype('Int64')
-    
-    # Remove rows with insufficient data (typically first 200 days)
-    indicators_df = indicators_df.dropna(subset=['sma_200'])
-    
-    return indicators_df
-
-@log_errors('fetch_technical_indicators')
-def process_symbol(symbol):
-    """Process technical indicators for a single symbol"""
     try:
-        logger.info(f"Processing {symbol}")
-        
         # Get price data
-        price_data = get_price_data_for_symbol(symbol)
-        if price_data is None:
-            logger.warning(f"No price data for {symbol}")
-            return 0
+        df = get_price_data(symbol)
+        if df.empty:
+            return pd.DataFrame()
+        
+        calc = TechnicalIndicatorsCalculator()
         
         # Calculate indicators
-        indicators_df = calculate_all_indicators(symbol, price_data)
-        if indicators_df is None or indicators_df.empty:
-            logger.warning(f"Could not calculate indicators for {symbol}")
-            return 0
+        df['symbol'] = symbol
+        df['rsi_14'] = calc.rsi(df['close'], 14)
+        df['sma_20'] = calc.sma(df['close'], 20)
+        df['sma_50'] = calc.sma(df['close'], 50)
+        df['sma_200'] = calc.sma(df['close'], 200)
+        df['ema_12'] = calc.ema(df['close'], 12)
+        df['ema_26'] = calc.ema(df['close'], 26)
         
-        # Store in database with ultra-fast upsert
-        records_count = len(indicators_df)
+        # MACD
+        macd, signal, histogram = calc.macd(df['close'])
+        df['macd'] = macd
+        df['macd_signal'] = signal
+        df['macd_histogram'] = histogram
         
+        # Bollinger Bands
+        bb_upper, bb_middle, bb_lower = calc.bollinger_bands(df['close'])
+        df['bb_upper'] = bb_upper
+        df['bb_middle'] = bb_middle
+        df['bb_lower'] = bb_lower
+        
+        # Stochastic
+        stoch_k, stoch_d = calc.stochastic(df['high'], df['low'], df['close'])
+        df['stoch_k'] = stoch_k
+        df['stoch_d'] = stoch_d
+        
+        # Williams %R
+        df['williams_r'] = calc.williams_r(df['high'], df['low'], df['close'])
+        
+        # ADX
+        df['adx'] = calc.adx(df['high'], df['low'], df['close'])
+        
+        # OBV
+        df['obv'] = calc.obv(df['close'], df['volume'])
+        
+        # Keep only indicator columns
+        indicator_cols = [
+            'symbol', 'rsi_14', 'sma_20', 'sma_50', 'sma_200', 
+            'ema_12', 'ema_26', 'macd', 'macd_signal', 'macd_histogram',
+            'bb_upper', 'bb_middle', 'bb_lower', 'stoch_k', 'stoch_d',
+            'williams_r', 'adx', 'obv'
+        ]
+        
+        result_df = df[indicator_cols].copy()
+        result_df['created_at'] = datetime.now()
+        
+        # Reset index to get date column
+        result_df.reset_index(inplace=True)
+        
+        # Remove NaN rows (from beginning due to rolling calculations)
+        result_df = result_df.dropna(subset=['sma_200'])  # 200-day SMA needs most data
+        
+        return result_df
+        
+    except Exception as e:
+        logger.error(f"Error calculating indicators for {symbol}: {e}")
+        return pd.DataFrame()
+
+def upsert_indicators(df: pd.DataFrame):
+    """Upsert indicators to database"""
+    if df.empty:
+        return 0
+    
+    try:
         with engine.begin() as conn:
-            # Create temporary table
-            temp_table = f"temp_tech_indicators_{int(time.time())}"
-            indicators_df.to_sql(temp_table, conn, if_exists='replace', index=False, method='multi')
+            # Create temp table
+            temp_table = f"temp_indicators_{int(time.time())}"
+            df.to_sql(temp_table, conn, if_exists='replace', index=False, method='multi')
             
-            # Ultra-fast upsert
+            # Upsert from temp table
             result = conn.execute(text(f"""
                 INSERT INTO technical_indicators (
-                    symbol, date, rsi_14, sma_20, sma_50, sma_200, ema_12, ema_26,
-                    macd, macd_signal, macd_histogram, bb_upper, bb_middle, bb_lower,
-                    stoch_k, stoch_d, williams_r, adx, obv
+                    symbol, date, rsi_14, sma_20, sma_50, sma_200,
+                    ema_12, ema_26, macd, macd_signal, macd_histogram,
+                    bb_upper, bb_middle, bb_lower, stoch_k, stoch_d,
+                    williams_r, adx, obv, created_at
                 )
                 SELECT 
-                    symbol, date, rsi_14, sma_20, sma_50, sma_200, ema_12, ema_26,
-                    macd, macd_signal, macd_histogram, bb_upper, bb_middle, bb_lower,
-                    stoch_k, stoch_d, williams_r, adx, obv
+                    symbol, date::date, rsi_14, sma_20, sma_50, sma_200,
+                    ema_12, ema_26, macd, macd_signal, macd_histogram,
+                    bb_upper, bb_middle, bb_lower, stoch_k, stoch_d,
+                    williams_r, adx, obv, created_at
                 FROM {temp_table}
                 ON CONFLICT (symbol, date) DO UPDATE SET
                     rsi_14 = EXCLUDED.rsi_14,
@@ -292,90 +255,154 @@ def process_symbol(symbol):
                     stoch_d = EXCLUDED.stoch_d,
                     williams_r = EXCLUDED.williams_r,
                     adx = EXCLUDED.adx,
-                    obv = EXCLUDED.obv
+                    obv = EXCLUDED.obv,
+                    created_at = EXCLUDED.created_at
             """))
             
             # Drop temp table
             conn.execute(text(f"DROP TABLE {temp_table}"))
-        
-        logger.info(f"Processed {symbol}: {records_count} records")
-        return records_count
-        
+            
+            return len(df)
+            
     except Exception as e:
-        logger.error(f"Failed to process {symbol}: {e}")
+        logger.error(f"Error upserting indicators: {e}")
         return 0
 
-def main():
-    print("[TECH INDICATORS] Starting ultra-premium technical indicators calculation...")
-    logger.info("Starting technical indicators calculation")
-    
-    start_time = time.time()
-    
-    # Get symbols to process
-    symbols = get_symbols_to_update()
-    print(f"[INFO] Processing technical indicators for {len(symbols)} symbols")
-    
-    if not symbols:
-        print("[ERROR] No symbols found to process")
-        return
-    
-    # Process symbols in parallel batches for maximum efficiency
-    total_records = 0
-    successful_symbols = 0
-    failed_symbols = 0
-    
-    print(f"[PROCESSING] Using {MAX_WORKERS} threads for maximum performance...")
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Process all symbols
-        future_to_symbol = {executor.submit(process_symbol, symbol): symbol for symbol in symbols}
+def process_symbol(symbol: str) -> tuple:
+    """Process a single symbol"""
+    try:
+        # Calculate indicators
+        df = calculate_indicators(symbol)
+        if df.empty:
+            return symbol, 0, 'NO_DATA'
         
-        with tqdm(total=len(symbols), desc="Processing symbols") as pbar:
-            for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    records = future.result()
-                    if records > 0:
-                        successful_symbols += 1
-                        total_records += records
-                    else:
-                        failed_symbols += 1
-                except Exception as e:
-                    logger.error(f"Error processing {symbol}: {e}")
-                    failed_symbols += 1
+        # Upsert to database
+        records = upsert_indicators(df)
+        
+        if records > 0:
+            return symbol, records, 'SUCCESS'
+        else:
+            return symbol, 0, 'FAILED'
+            
+    except Exception as e:
+        logger.error(f"Error processing {symbol}: {e}")
+        return symbol, 0, 'ERROR'
+
+def process_batch(symbols: list, use_parallel: bool = True):
+    """Process a batch of symbols"""
+    results = {'SUCCESS': 0, 'NO_DATA': 0, 'FAILED': 0, 'ERROR': 0}
+    total_records = 0
+    
+    with tqdm(total=len(symbols), desc="Calculating indicators", unit="symbol") as pbar:
+        if use_parallel:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(process_symbol, s): s for s in symbols}
+                
+                for future in as_completed(futures):
+                    symbol, records, status = future.result()
+                    results[status] += 1
+                    total_records += records
+                    
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'Success': results['SUCCESS'],
+                        'No_Data': results['NO_DATA'],
+                        'Failed': results['FAILED'],
+                        'Records': total_records
+                    })
+        else:
+            for symbol in symbols:
+                symbol_result, records, status = process_symbol(symbol)
+                results[status] += 1
+                total_records += records
                 
                 pbar.update(1)
                 pbar.set_postfix({
-                    'Success': successful_symbols,
-                    'Failed': failed_symbols,
+                    'Success': results['SUCCESS'],
+                    'No_Data': results['NO_DATA'],
+                    'Failed': results['FAILED'],
                     'Records': total_records
                 })
     
-    elapsed = time.time() - start_time
-    memory_mb = get_memory_usage()
+    return results, total_records
+
+def get_symbols_with_prices():
+    """Get symbols that have price data"""
+    query = text("""
+        SELECT DISTINCT symbol 
+        FROM stock_prices 
+        WHERE symbol IN (
+            SELECT symbol FROM symbol_universe 
+            WHERE is_etf = FALSE AND country = 'USA'
+        )
+        ORDER BY symbol
+    """)
     
-    # Log health metrics
-    status = 'SUCCESS' if failed_symbols == 0 else 'PARTIAL_SUCCESS' if successful_symbols > 0 else 'FAILED'
+    with engine.connect() as conn:
+        result = conn.execute(query)
+        return [row[0] for row in result]
+
+def main():
+    """Main execution"""
+    import argparse
     
-    log_script_health(
-        script_name='fetch_technical_indicators',
-        status=status,
-        symbols_processed=successful_symbols,
-        symbols_failed=failed_symbols,
-        execution_time=elapsed,
-        memory_usage=memory_mb,
-        error_summary={'total_records': total_records, 'records_per_second': total_records/elapsed if elapsed > 0 else 0}
-    )
+    parser = argparse.ArgumentParser(description="Calculate technical indicators from price data")
+    parser.add_argument("--symbols", nargs="+", help="Specific symbols to process")
+    parser.add_argument("--limit", type=int, help="Limit number of symbols")
+    parser.add_argument("--parallel", action="store_true", help="Use parallel processing")
+    args = parser.parse_args()
     
-    print(f"\n[ULTRA-PREMIUM COMPLETE]")
-    print(f"[SUCCESS] Symbols processed: {successful_symbols}")
-    print(f"[FAILED] Symbols failed: {failed_symbols}")
-    print(f"[RECORDS] Total indicator records: {total_records:,}")
-    print(f"[PERFORMANCE] Execution time: {elapsed:.2f}s")
-    print(f"[MEMORY] Peak usage: {memory_mb:.1f}MB")
-    print(f"[EFFICIENCY] Average: {total_records/elapsed:.0f} records/second")
+    start_time = time.time()
+    print("\n" + "=" * 60)
+    print("TECHNICAL INDICATORS CALCULATOR")
+    print("=" * 60)
     
-    logger.info(f"Technical indicators complete: {successful_symbols} symbols, {total_records} records in {elapsed:.2f}s")
+    # Get symbols to process
+    if args.symbols:
+        symbols = args.symbols
+        print(f"[INFO] Processing specific symbols: {symbols}")
+    else:
+        symbols = get_symbols_with_prices()
+        if args.limit:
+            symbols = symbols[:args.limit]
+        print(f"[INFO] Found {len(symbols)} symbols with price data")
+    
+    if not symbols:
+        print("[ERROR] No symbols to process")
+        return
+    
+    # Process in batches
+    batch_results = {'SUCCESS': 0, 'NO_DATA': 0, 'FAILED': 0, 'ERROR': 0}
+    total_records = 0
+    
+    for i in range(0, len(symbols), BATCH_SIZE):
+        batch = symbols[i:i+BATCH_SIZE]
+        print(f"\n[BATCH] Processing batch {i//BATCH_SIZE + 1} ({len(batch)} symbols)")
+        
+        results, records = process_batch(batch, use_parallel=args.parallel)
+        
+        # Aggregate results
+        for status, count in results.items():
+            batch_results[status] += count
+        total_records += records
+    
+    # Summary
+    duration = time.time() - start_time
+    
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"Total symbols: {len(symbols)}")
+    print(f"Successful: {batch_results['SUCCESS']}")
+    print(f"No data: {batch_results['NO_DATA']}")
+    print(f"Failed: {batch_results['FAILED']}")
+    print(f"Errors: {batch_results['ERROR']}")
+    print(f"Total records: {total_records:,}")
+    print(f"Duration: {duration:.1f}s")
+    print(f"Rate: {len(symbols)/duration:.2f} symbols/sec")
+    
+    # Log summary
+    logger.info(f"Technical indicators calculation completed: {batch_results}")
 
 if __name__ == "__main__":
     main()

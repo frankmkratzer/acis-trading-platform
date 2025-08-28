@@ -21,15 +21,16 @@ WITH latest AS (
   GROUP BY symbol
 ),
 ordered AS (
-  -- Precompute future adjusted_close using LEAD over trading days
+  -- Precompute future adjusted close using LEAD over trading days
+  -- Now using proper adjusted_close (fixed in fetch_prices.py to use close as fallback for bad data)
   SELECT
       e.symbol,
-      e.date::date AS as_of_date,
+      e.trade_date AS as_of_date,
       e.adjusted_close,
-      LEAD(e.adjusted_close,  21) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_21,
-      LEAD(e.adjusted_close,  63) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_63,
-      LEAD(e.adjusted_close, 126) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_126,
-      LEAD(e.adjusted_close, 252) OVER (PARTITION BY e.symbol ORDER BY e.date) AS adj_252
+      LEAD(e.adjusted_close,  21) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_21,
+      LEAD(e.adjusted_close,  63) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_63,
+      LEAD(e.adjusted_close, 126) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_126,
+      LEAD(e.adjusted_close, 252) OVER (PARTITION BY e.symbol ORDER BY e.trade_date) AS adj_252
   FROM stock_prices e
 ),
 calc AS (

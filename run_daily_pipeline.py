@@ -53,7 +53,14 @@ class DailyPipelineRunner:
                 2400, 
                 True, 
                 ("fetch_symbol_universe.py",), 
-                "Ultra-premium price fetcher (Alpha Vantage 300 calls/min)"
+                "Ultra-premium price fetcher (Alpha Vantage 600 calls/min)"
+            ),
+            ScriptConfig(
+                "fetch_options.py",
+                1800,
+                False,  # Not critical - options are supplemental data
+                ("fetch_symbol_universe.py",),
+                "Fetch real-time and historical options data with Greeks"
             ),
             ScriptConfig(
                 "fetch_technical_indicators.py", 
@@ -61,6 +68,13 @@ class DailyPipelineRunner:
                 True, 
                 ("fetch_prices.py",), 
                 "Calculate technical indicators locally from price data"
+            ),
+            ScriptConfig(
+                "calculate_quality_rankings.py",
+                1800,
+                False,  # Not critical - rankings are derived data
+                ("fetch_prices.py", "fetch_sp500_history.py"),  # Needs prices and SP500 data
+                "Calculate stock quality rankings (SP500 outperformance, FCF, fundamentals)"
             ),
         ]
         
@@ -116,7 +130,7 @@ class DailyPipelineRunner:
             duration = time.time() - start_time
             
             if result.returncode == 0:
-                logger.info(f"✅ {script.name} completed successfully in {duration:.1f}s")
+                logger.info(f"[SUCCESS] {script.name} completed successfully in {duration:.1f}s")
                 return {
                     'success': True,
                     'duration': duration,
@@ -125,7 +139,7 @@ class DailyPipelineRunner:
                     'returncode': result.returncode
                 }
             else:
-                logger.error(f"❌ {script.name} failed with return code {result.returncode}")
+                logger.error(f"[FAILED] {script.name} failed with return code {result.returncode}")
                 if result.stderr:
                     logger.error(f"STDERR: {result.stderr}")
                 return {
@@ -139,7 +153,7 @@ class DailyPipelineRunner:
                 
         except subprocess.TimeoutExpired:
             duration = time.time() - start_time
-            logger.error(f"⏰ {script.name} timed out after {script.timeout}s")
+            logger.error(f"[TIMEOUT] {script.name} timed out after {script.timeout}s")
             return {
                 'success': False,
                 'duration': duration,
@@ -147,7 +161,7 @@ class DailyPipelineRunner:
             }
         except Exception as e:
             duration = time.time() - start_time
-            logger.error(f"💥 {script.name} failed with exception: {e}")
+            logger.error(f"[EXCEPTION] {script.name} failed with exception: {e}")
             return {
                 'success': False,
                 'duration': duration,
@@ -161,13 +175,13 @@ class DailyPipelineRunner:
         failed_scripts = 0
         skipped_scripts = 0
         
-        logger.info("🌅 Starting ACIS Daily Data Pipeline")
+        logger.info("[PIPELINE] Starting ACIS Daily Data Pipeline")
         logger.info(f"Pipeline mode: {'Skip non-critical on failure' if skip_non_critical else 'Run all scripts'}")
         
         for script in self.scripts:
             # Skip non-critical scripts if we have failures and skip mode is enabled
             if skip_non_critical and not script.critical and failed_scripts > 0:
-                logger.info(f"⏭️  Skipping non-critical script {script.name} due to previous failures")
+                logger.info(f"[SKIP] Skipping non-critical script {script.name} due to previous failures")
                 skipped_scripts += 1
                 continue
             
@@ -182,7 +196,7 @@ class DailyPipelineRunner:
                 
                 # Stop pipeline if critical script fails
                 if script.critical:
-                    logger.error(f"❌ Critical script {script.name} failed - stopping daily pipeline")
+                    logger.error(f"[CRITICAL] Script {script.name} failed - stopping daily pipeline")
                     break
         
         pipeline_duration = time.time() - pipeline_start
@@ -203,7 +217,7 @@ class DailyPipelineRunner:
     def print_summary(self, summary: dict):
         """Print pipeline execution summary"""
         logger.info("=" * 80)
-        logger.info("🌅 ACIS DAILY PIPELINE SUMMARY")
+        logger.info("[SUMMARY] ACIS DAILY PIPELINE SUMMARY")
         logger.info("=" * 80)
         
         logger.info(f"Total Duration: {summary['duration']:.1f} seconds")
@@ -213,14 +227,14 @@ class DailyPipelineRunner:
         
         logger.info("\nDaily Script Results:")
         for script_name, result in summary['results'].items():
-            status = "✅ SUCCESS" if result['success'] else "❌ FAILED"
+            status = "[SUCCESS]" if result['success'] else "[FAILED]"
             duration = result['duration']
             logger.info(f"  {script_name}: {status} ({duration:.1f}s)")
             
             if not result['success'] and 'error' in result:
                 logger.info(f"    Error: {result['error']}")
         
-        overall_status = "🎉 DAILY PIPELINE COMPLETED" if summary['success'] else "💥 DAILY PIPELINE FAILED"
+        overall_status = "[COMPLETE] DAILY PIPELINE COMPLETED" if summary['success'] else "[FAILED] DAILY PIPELINE FAILED"
         logger.info(f"\n{overall_status}")
         logger.info("=" * 80)
 
