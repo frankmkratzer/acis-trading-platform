@@ -249,64 +249,85 @@ def simulate_institutional_data(engine):
         holdings_df = pd.DataFrame(holdings_data)
         signals_df = pd.DataFrame(signals_data)
         
-        # Save holdings
-        temp_table = f"temp_inst_holdings_{int(time.time() * 1000)}"
-        holdings_df.to_sql(temp_table, engine, if_exists='replace', index=False)
+        # Use consistent temp table names (no timestamp) and ensure cleanup
+        temp_holdings_table = "temp_inst_holdings_staging"
+        temp_signals_table = "temp_inst_signals_staging"
         
-        with engine.connect() as conn:
-            conn.execute(text(f"""
-                INSERT INTO institutional_holdings (
-                    symbol, report_date,
-                    institutional_ownership_pct, num_institutions,
-                    total_shares_held, total_value,
-                    quarter_change_shares, quarter_change_pct,
-                    new_positions, closed_positions,
-                    increased_positions, decreased_positions,
-                    fetched_at
-                )
-                SELECT 
-                    symbol, report_date,
-                    institutional_ownership_pct, num_institutions,
-                    total_shares_held, total_value,
-                    NULL as quarter_change_shares, quarter_change_pct,
-                    new_positions, closed_positions,
-                    increased_positions, decreased_positions,
-                    fetched_at
-                FROM {temp_table}
-                ON CONFLICT (symbol, report_date) DO UPDATE SET
-                    institutional_ownership_pct = EXCLUDED.institutional_ownership_pct,
-                    num_institutions = EXCLUDED.num_institutions,
-                    total_shares_held = EXCLUDED.total_shares_held,
-                    total_value = EXCLUDED.total_value,
-                    quarter_change_pct = EXCLUDED.quarter_change_pct,
-                    new_positions = EXCLUDED.new_positions,
-                    closed_positions = EXCLUDED.closed_positions,
-                    increased_positions = EXCLUDED.increased_positions,
-                    decreased_positions = EXCLUDED.decreased_positions,
-                    fetched_at = EXCLUDED.fetched_at
-            """))
-            conn.execute(text(f"DROP TABLE IF EXISTS {temp_table}"))
-            conn.commit()
-        
-        # Save signals
-        temp_table = f"temp_inst_signals_{int(time.time() * 1000)}"
-        signals_df.to_sql(temp_table, engine, if_exists='replace', index=False)
-        
-        with engine.connect() as conn:
-            conn.execute(text(f"""
-                INSERT INTO institutional_signals
-                SELECT * FROM {temp_table}
-                ON CONFLICT (symbol, signal_date) DO UPDATE SET
-                    smart_money_signal = EXCLUDED.smart_money_signal,
-                    net_institutional_flow = EXCLUDED.net_institutional_flow,
-                    momentum_score = EXCLUDED.momentum_score,
-                    heavy_accumulation = EXCLUDED.heavy_accumulation,
-                    moderate_accumulation = EXCLUDED.moderate_accumulation,
-                    distribution = EXCLUDED.distribution,
-                    updated_at = EXCLUDED.updated_at
-            """))
-            conn.execute(text(f"DROP TABLE IF EXISTS {temp_table}"))
-            conn.commit()
+        with engine.begin() as conn:  # Use transaction for automatic rollback on error
+            try:
+                # Drop any existing temp tables first
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_holdings_table}"))
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_signals_table}"))
+                
+                # Create and populate temp holdings table
+                holdings_df.to_sql(temp_holdings_table, conn, if_exists='replace', index=False)
+                
+                # Insert holdings with upsert
+                conn.execute(text(f"""
+                    INSERT INTO institutional_holdings (
+                        symbol, report_date,
+                        institutional_ownership_pct, num_institutions,
+                        total_shares_held, total_value,
+                        quarter_change_shares, quarter_change_pct,
+                        new_positions, closed_positions,
+                        increased_positions, decreased_positions,
+                        fetched_at
+                    )
+                    SELECT 
+                        symbol, report_date,
+                        institutional_ownership_pct, num_institutions,
+                        total_shares_held, total_value,
+                        NULL as quarter_change_shares, quarter_change_pct,
+                        new_positions, closed_positions,
+                        increased_positions, decreased_positions,
+                        fetched_at
+                    FROM {temp_holdings_table}
+                    ON CONFLICT (symbol, report_date) DO UPDATE SET
+                        institutional_ownership_pct = EXCLUDED.institutional_ownership_pct,
+                        num_institutions = EXCLUDED.num_institutions,
+                        total_shares_held = EXCLUDED.total_shares_held,
+                        total_value = EXCLUDED.total_value,
+                        quarter_change_pct = EXCLUDED.quarter_change_pct,
+                        new_positions = EXCLUDED.new_positions,
+                        closed_positions = EXCLUDED.closed_positions,
+                        increased_positions = EXCLUDED.increased_positions,
+                        decreased_positions = EXCLUDED.decreased_positions,
+                        fetched_at = EXCLUDED.fetched_at
+                """))
+                
+                # Create and populate temp signals table
+                signals_df.to_sql(temp_signals_table, conn, if_exists='replace', index=False)
+                
+                # Insert signals with upsert
+                conn.execute(text(f"""
+                    INSERT INTO institutional_signals
+                    SELECT * FROM {temp_signals_table}
+                    ON CONFLICT (symbol, signal_date) DO UPDATE SET
+                        smart_money_signal = EXCLUDED.smart_money_signal,
+                        net_institutional_flow = EXCLUDED.net_institutional_flow,
+                        momentum_score = EXCLUDED.momentum_score,
+                        heavy_accumulation = EXCLUDED.heavy_accumulation,
+                        moderate_accumulation = EXCLUDED.moderate_accumulation,
+                        distribution = EXCLUDED.distribution,
+                        updated_at = EXCLUDED.updated_at
+                """))
+                
+                # Clean up temp tables
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_holdings_table}"))
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_signals_table}"))
+                
+            except Exception as e:
+                # Transaction will automatically rollback
+                logger.error(f"Error saving institutional data: {e}")
+                raise
+            
+            finally:
+                # Ensure cleanup even if error occurs
+                try:
+                    conn.execute(text(f"DROP TABLE IF EXISTS {temp_holdings_table}"))
+                    conn.execute(text(f"DROP TABLE IF EXISTS {temp_signals_table}"))
+                except:
+                    pass  # Ignore cleanup errors
         
         logger.info(f"Saved institutional data for {len(holdings_data)} stocks")
 
