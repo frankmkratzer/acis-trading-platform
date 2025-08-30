@@ -202,14 +202,35 @@ def simulate_institutional_data(engine):
         quality_factor = (row['fscore'] / 9) if pd.notna(row['fscore']) else 0.5
         quarter_change = np.random.normal(quality_factor * 5 - 2.5, 10)
         
+        # Calculate total shares and quarter change in shares
+        total_shares = int(row['market_cap'] / 50 * ownership_pct / 100)
+        quarter_change_shares = int(total_shares * quarter_change / 100)
+        
+        # Generate top holder information
+        top_holders = [
+            "Vanguard Group Inc", "BlackRock Inc", "State Street Corp",
+            "Fidelity Management", "Capital Group", "Invesco Ltd",
+            "Geode Capital Management", "Morgan Stanley", "Bank of America Corp",
+            "JPMorgan Chase & Co", "Goldman Sachs", "Wellington Management"
+        ]
+        top_holder_name = np.random.choice(top_holders)
+        # Top holder typically owns 5-15% of institutional holdings
+        top_holder_pct_of_inst = np.random.uniform(0.05, 0.15)
+        top_holder_shares = int(total_shares * top_holder_pct_of_inst)
+        top_holder_pct = round(ownership_pct * top_holder_pct_of_inst, 2)
+        
         # Create holdings record
         holdings_data.append({
             'symbol': row['symbol'],
             'report_date': datetime.now().date(),
             'institutional_ownership_pct': round(ownership_pct, 2),
             'num_institutions': num_institutions,
-            'total_shares_held': int(row['market_cap'] / 50 * ownership_pct / 100),
+            'total_shares_held': total_shares,
             'total_value': row['market_cap'] * ownership_pct / 100,
+            'top_holder_name': top_holder_name,
+            'top_holder_shares': top_holder_shares,
+            'top_holder_pct': top_holder_pct,
+            'quarter_change_shares': quarter_change_shares,
             'quarter_change_pct': round(quarter_change, 2),
             'new_positions': max(0, int(np.random.normal(5, 3))),
             'closed_positions': max(0, int(np.random.normal(2, 2))),
@@ -268,6 +289,7 @@ def simulate_institutional_data(engine):
                         symbol, report_date,
                         institutional_ownership_pct, num_institutions,
                         total_shares_held, total_value,
+                        top_holder_name, top_holder_shares, top_holder_pct,
                         quarter_change_shares, quarter_change_pct,
                         new_positions, closed_positions,
                         increased_positions, decreased_positions,
@@ -277,7 +299,8 @@ def simulate_institutional_data(engine):
                         symbol, report_date,
                         institutional_ownership_pct, num_institutions,
                         total_shares_held, total_value,
-                        NULL as quarter_change_shares, quarter_change_pct,
+                        top_holder_name, top_holder_shares, top_holder_pct,
+                        quarter_change_shares, quarter_change_pct,
                         new_positions, closed_positions,
                         increased_positions, decreased_positions,
                         fetched_at
@@ -287,6 +310,10 @@ def simulate_institutional_data(engine):
                         num_institutions = EXCLUDED.num_institutions,
                         total_shares_held = EXCLUDED.total_shares_held,
                         total_value = EXCLUDED.total_value,
+                        top_holder_name = EXCLUDED.top_holder_name,
+                        top_holder_shares = EXCLUDED.top_holder_shares,
+                        top_holder_pct = EXCLUDED.top_holder_pct,
+                        quarter_change_shares = EXCLUDED.quarter_change_shares,
                         quarter_change_pct = EXCLUDED.quarter_change_pct,
                         new_positions = EXCLUDED.new_positions,
                         closed_positions = EXCLUDED.closed_positions,

@@ -580,7 +580,7 @@ def main():
         
         # Set analysis period
         end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=365)  # 1 year analysis
+        start_date = datetime(1990, 1, 1).date()  # Analyze all available historical data
         
         print(f"\n[INFO] Attribution period: {start_date} to {end_date}")
         

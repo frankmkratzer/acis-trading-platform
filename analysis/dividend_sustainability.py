@@ -55,7 +55,7 @@ class DividendSustainabilityAnalyzer:
                     COUNT(*) as payment_count
                 FROM dividend_history
                 WHERE symbol = :symbol
-                    AND ex_date >= CURRENT_DATE - INTERVAL '30 years'
+                    -- NO DATE LIMIT - Get complete dividend history
                 GROUP BY symbol, EXTRACT(YEAR FROM ex_date)
                 ORDER BY year DESC
             ),

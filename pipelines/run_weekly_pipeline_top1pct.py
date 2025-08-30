@@ -227,7 +227,7 @@ def main():
     
     # Phase 6: Machine Learning (TOP 1%)
     print("\n" + "="*60)
-    print("PHASE 6: MACHINE LEARNING")
+    print("PHASE 6: MACHINE LEARNING & DEEP LEARNING")
     print("="*60)
     
     # Train ML models
@@ -237,6 +237,17 @@ def main():
             "Training XGBoost model",
             timeout=5400  # 1.5 hours
         )
+        
+        # Train LSTM deep learning model if enabled
+        if os.getenv("ENABLE_DL", "false").lower() == "true":
+            results['dl_train'] = run_script(
+                "ml_analysis/deep_learning/lstm_return_predictor.py",
+                "Training LSTM deep learning model",
+                timeout=7200  # 2 hours
+            )
+            print("[INFO] Ensemble predictions will combine XGBoost + LSTM")
+        else:
+            print("[INFO] Deep learning disabled (set ENABLE_DL=true to enable)")
     else:
         print("[INFO] ML training disabled (set ENABLE_ML=true to enable)")
     
@@ -282,8 +293,8 @@ def main():
             status = "✓" if results[task] else "✗"
             print(f"  {status} {task}")
     
-    print("\n🤖 Machine Learning:")
-    for task in ['ml_train']:
+    print("\n🤖 Machine Learning & Deep Learning:")
+    for task in ['ml_train', 'dl_train']:
         if task in results:
             status = "✓" if results[task] else "✗"
             print(f"  {status} {task}")

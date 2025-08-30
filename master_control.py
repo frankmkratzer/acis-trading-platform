@@ -113,7 +113,11 @@ class ACISMasterControl:
             'optimize': 'analysis/walk_forward_optimization.py',
             'attribution': 'analysis/performance_attribution.py',
             'ml': 'ml_analysis/strategies/xgboost_return_predictor.py',
-            'master': 'analysis/calculate_master_scores.py'
+            'lstm': 'ml_analysis/deep_learning/lstm_return_predictor.py',
+            'master': 'analysis/calculate_master_scores.py',
+            'excess-cash': 'analysis/excess_cash_flow.py',
+            'dividend': 'analysis/dividend_sustainability.py',
+            'trading': 'trading/automated_trading_manager.py'
         }
         
         if analysis_type in analysis_scripts:
@@ -202,6 +206,44 @@ class ACISMasterControl:
             f"{sys.executable} database/setup_schema_chunked.py",
             "Setting up database schema"
         )
+    
+    def run_deep_learning(self, model_type='lstm'):
+        """Run deep learning models"""
+        print("\n" + "="*60)
+        print("DEEP LEARNING PIPELINE")
+        print("="*60)
+        
+        if model_type == 'lstm':
+            script = "ml_analysis/deep_learning/lstm_return_predictor.py"
+            desc = "Training LSTM model for return prediction"
+        elif model_type == 'ensemble':
+            # Run both XGBoost and LSTM, then ensemble
+            success = self.run_command(
+                f"{sys.executable} ml_analysis/strategies/xgboost_return_predictor.py",
+                "Training XGBoost model"
+            )
+            if success:
+                success = self.run_command(
+                    f"{sys.executable} ml_analysis/deep_learning/lstm_return_predictor.py",
+                    "Training LSTM model"
+                )
+            return success
+        else:
+            print(f"[ERROR] Unknown DL model type: {model_type}")
+            return False
+        
+        return self.run_command(f"{sys.executable} {script}", desc)
+    
+    def run_automated_trading(self, mode='paper'):
+        """Run automated trading system"""
+        print("\n" + "="*60)
+        print(f"AUTOMATED TRADING ({mode.upper()} MODE)")
+        print("="*60)
+        
+        env_var = f"TRADING_MODE={mode}"
+        command = f"{env_var} {sys.executable} trading/automated_trading_manager.py"
+        
+        return self.run_command(command, f"Running automated trading in {mode} mode")
 
 
 def main():
@@ -217,6 +259,9 @@ Examples:
   python master_control.py --verify          # Verify database tables
   python master_control.py --status          # Show portfolio status
   python master_control.py --analyze kelly   # Run Kelly Criterion analysis
+  python master_control.py --train-lstm      # Train LSTM deep learning model
+  python master_control.py --train-ensemble  # Train XGBoost + LSTM ensemble
+  python master_control.py --trade-paper     # Run paper trading (simulation)
   python master_control.py --setup           # Setup database schema
 
 Available analysis types:
@@ -232,8 +277,12 @@ Available analysis types:
   backtest      - Backtesting framework
   optimize      - Walk-forward optimization
   attribution   - Performance attribution
-  ml            - Machine learning predictions
+  ml            - XGBoost machine learning predictions
+  lstm          - LSTM deep learning predictions
   master        - Master composite scores
+  excess-cash   - Excess cash flow analysis
+  dividend      - Dividend sustainability analysis
+  trading       - Automated trading execution
         """
     )
     
@@ -250,6 +299,18 @@ Available analysis types:
     # Analysis options
     parser.add_argument('--analyze', type=str, metavar='TYPE',
                        help='Run specific analysis')
+    
+    # Deep Learning options
+    parser.add_argument('--train-lstm', action='store_true',
+                       help='Train LSTM deep learning model')
+    parser.add_argument('--train-ensemble', action='store_true',
+                       help='Train ensemble of XGBoost + LSTM')
+    
+    # Trading options
+    parser.add_argument('--trade-paper', action='store_true',
+                       help='Run automated trading in paper mode')
+    parser.add_argument('--trade-live', action='store_true',
+                       help='Run automated trading in LIVE mode (use with caution)')
     
     # Management options
     parser.add_argument('--verify', action='store_true',
@@ -282,6 +343,20 @@ Available analysis types:
         return 0 if control.run_weekly_pipeline(enhanced=False) else 1
     elif args.analyze:
         return 0 if control.run_specific_analysis(args.analyze) else 1
+    elif args.train_lstm:
+        return 0 if control.run_deep_learning('lstm') else 1
+    elif args.train_ensemble:
+        return 0 if control.run_deep_learning('ensemble') else 1
+    elif args.trade_paper:
+        return 0 if control.run_automated_trading('paper') else 1
+    elif args.trade_live:
+        print("\n[WARNING] Live trading mode - real money at risk!")
+        confirm = input("Type 'CONFIRM' to proceed: ")
+        if confirm == 'CONFIRM':
+            return 0 if control.run_automated_trading('live') else 1
+        else:
+            print("[INFO] Live trading cancelled")
+            return 0
     elif args.verify:
         return 0 if control.verify_database() else 1
     elif args.status:

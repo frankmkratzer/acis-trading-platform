@@ -713,7 +713,7 @@ def main():
         
         # Set optimization period
         end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=365*3)  # 3 years of data
+        start_date = datetime(1990, 1, 1).date()  # Use all available historical data
         
         print(f"\n[INFO] Optimization period: {start_date} to {end_date}")
         

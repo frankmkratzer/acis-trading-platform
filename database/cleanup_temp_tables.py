@@ -54,7 +54,7 @@ def cleanup_temp_tables():
             temp_tables = result.fetchall()
             
             if not temp_tables:
-                print("\n✅ No temporary tables found - database is clean!")
+                print("\n[SUCCESS] No temporary tables found - database is clean!")
                 return 0
             
             print(f"\nFound {len(temp_tables)} temporary table(s) to clean up:")
@@ -62,7 +62,7 @@ def cleanup_temp_tables():
             
             total_size = 0
             for table_name, size in temp_tables:
-                print(f"  • {table_name:50} {size:>10}")
+                print(f"  - {table_name:50} {size:>10}")
             
             # Ask for confirmation
             print("\n" + "="*60)
@@ -75,13 +75,13 @@ def cleanup_temp_tables():
                     try:
                         conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
                         conn.commit()
-                        print(f"  ✓ Dropped: {table_name}")
+                        print(f"  [OK] Dropped: {table_name}")
                         dropped_count += 1
                     except Exception as e:
-                        print(f"  ✗ Failed to drop {table_name}: {e}")
+                        print(f"  [FAILED] Failed to drop {table_name}: {e}")
                         logger.error(f"Failed to drop {table_name}: {e}")
                 
-                print(f"\n✅ Successfully dropped {dropped_count}/{len(temp_tables)} table(s)")
+                print(f"\n[SUCCESS] Successfully dropped {dropped_count}/{len(temp_tables)} table(s)")
                 
                 # Verify cleanup
                 result = conn.execute(text("""
@@ -96,18 +96,18 @@ def cleanup_temp_tables():
                 
                 remaining = result.scalar()
                 if remaining == 0:
-                    print("✅ All temporary tables have been cleaned up!")
+                    print("[SUCCESS] All temporary tables have been cleaned up!")
                 else:
-                    print(f"⚠️  {remaining} temporary table(s) still remain")
+                    print(f"[WARNING] {remaining} temporary table(s) still remain")
                 
             else:
-                print("\n❌ Cleanup cancelled by user")
+                print("\n[CANCELLED] Cleanup cancelled by user")
                 return 1
         
         return 0
         
     except Exception as e:
-        print(f"\n❌ Error during cleanup: {e}")
+        print(f"\n[ERROR] Error during cleanup: {e}")
         logger.error(f"Cleanup failed: {e}")
         return 1
 
@@ -155,7 +155,7 @@ def main():
     
     # If auto-yes, modify the cleanup function
     if args.auto_yes:
-        print("⚠️  Auto-confirmation enabled - will delete without asking")
+        print("[WARNING] Auto-confirmation enabled - will delete without asking")
         # You could modify cleanup_temp_tables to accept this parameter
     
     return cleanup_temp_tables()

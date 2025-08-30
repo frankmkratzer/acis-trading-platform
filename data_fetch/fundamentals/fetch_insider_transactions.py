@@ -43,7 +43,7 @@ AV_URL = "https://www.alphavantage.co/query"
 # Configuration
 MAX_WORKERS = 8  # Can use more workers with centralized rate limiter
 CALLS_PER_MIN = 600  # Premium API tier rate limit
-LOOKBACK_DAYS = 365  # Fetch transactions from last year
+LOOKBACK_DAYS = None  # Fetch all available historical transactions
 
 def rate_limited_get(url, params, timeout=20):
     """Rate-limited GET request using centralized rate limiter"""

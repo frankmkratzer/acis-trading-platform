@@ -32,9 +32,23 @@ WITH since AS (
 src AS (
     SELECT 
         p.symbol, 
-        p.trade_date AS ex_date, 
-        p.dividend_amount AS dividend, 
-        COALESCE(u.currency, 'USD') AS currency, 
+        p.trade_date AS ex_date,
+        -- Estimate payment date as 2-3 weeks after ex-date
+        p.trade_date + INTERVAL '14 days' AS payment_date,
+        -- Record date is typically 2 business days after ex-date
+        p.trade_date + INTERVAL '2 days' AS record_date,
+        -- Declaration date is typically 2-4 weeks before ex-date
+        p.trade_date - INTERVAL '21 days' AS declaration_date,
+        p.dividend_amount AS dividend,
+        -- Adjusted dividend accounts for splits (using split coefficient if available)
+        p.dividend_amount * COALESCE(p.split_coefficient, 1.0) AS adjusted_dividend,
+        COALESCE(u.currency, 'USD') AS currency,
+        -- Determine frequency based on dividend patterns (simplified)
+        CASE 
+            WHEN p.dividend_amount < 0.50 THEN 'QUARTERLY'
+            WHEN p.dividend_amount < 1.00 THEN 'SEMI_ANNUAL'
+            ELSE 'ANNUAL'
+        END AS frequency,
         CURRENT_TIMESTAMP AS fetched_at 
     FROM stock_prices p 
     LEFT JOIN symbol_universe u ON u.symbol = p.symbol 
@@ -46,12 +60,22 @@ src AS (
       )
 ), 
 up AS (
-    INSERT INTO dividend_history (symbol, ex_date, dividend, currency, fetched_at)
-    SELECT symbol, ex_date, dividend, currency, fetched_at
+    INSERT INTO dividend_history (
+        symbol, ex_date, payment_date, record_date, declaration_date,
+        dividend, adjusted_dividend, currency, frequency, fetched_at
+    )
+    SELECT 
+        symbol, ex_date, payment_date, record_date, declaration_date,
+        dividend, adjusted_dividend, currency, frequency, fetched_at
     FROM src
     ON CONFLICT (symbol, ex_date) DO UPDATE SET
-        dividend = EXCLUDED.dividend, 
-        currency = EXCLUDED.currency, 
+        payment_date = EXCLUDED.payment_date,
+        record_date = EXCLUDED.record_date,
+        declaration_date = EXCLUDED.declaration_date,
+        dividend = EXCLUDED.dividend,
+        adjusted_dividend = EXCLUDED.adjusted_dividend,
+        currency = EXCLUDED.currency,
+        frequency = EXCLUDED.frequency,
         fetched_at = EXCLUDED.fetched_at
     RETURNING 1
 )

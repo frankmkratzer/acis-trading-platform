@@ -34,13 +34,13 @@ class ExcessCashFlowAnalyzer:
     def __init__(self):
         self.engine = engine
         
-    def fetch_cash_flow_data(self, symbols=None, years_back=5):
+    def fetch_cash_flow_data(self, symbols=None, years_back=30):
         """
         Fetch cash flow, dividend, and capex data for analysis
         
         Args:
             symbols: List of symbols to analyze (None = all)
-            years_back: Number of years of data to fetch
+            years_back: Number of years of data to fetch (default: 30 years)
         """
         
         query = text("""
@@ -127,7 +127,7 @@ class ExcessCashFlowAnalyzer:
         """
         
         # Fetch data for this symbol
-        df = self.fetch_cash_flow_data(symbols=[symbol], years_back=10)
+        df = self.fetch_cash_flow_data(symbols=[symbol], years_back=30)
         
         if df.empty:
             logger.warning(f"No cash flow data available for {symbol}")

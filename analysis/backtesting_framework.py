@@ -528,7 +528,7 @@ def main():
         
         # Set backtest parameters
         end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=365*2)  # 2 years backtest
+        start_date = datetime(1990, 1, 1).date()  # Backtest from earliest available data
         
         print(f"\n[INFO] Backtesting from {start_date} to {end_date}")
         

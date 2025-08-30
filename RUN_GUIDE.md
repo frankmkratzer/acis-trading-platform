@@ -1,6 +1,11 @@
 # ACIS Platform Run Guide
 **Last Updated**: December 2024  
-**Version**: TOP 1% Strategy Implementation v2.0
+**Version**: TOP 1% Strategy Implementation v3.0 (with Deep Learning)
+
+## 🎯 Primary Interface: master_control.py
+
+**IMPORTANT**: `master_control.py` is the primary interface for ALL operations.
+Never use `main.py` (deprecated). Always use master_control.py for consistency.
 
 ## 🚀 Quick Start
 
@@ -358,6 +363,113 @@ JOIN trading_accounts ta ON ab.account_id = ta.account_id
 WHERE DATE(snapshot_date) = CURRENT_DATE;
 ```
 
+## 🧠 Deep Learning Operations
+
+### Initial Setup for Deep Learning
+```bash
+# 1. Install TensorFlow (GPU version recommended)
+pip install tensorflow-gpu==2.13.0
+pip install scikit-learn xgboost joblib
+
+# 2. Verify GPU availability
+python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
+
+# 3. Train initial LSTM model (takes 2-3 hours with GPU)
+python master_control.py --train-lstm
+
+# 4. Train ensemble model (XGBoost + LSTM)
+python master_control.py --train-ensemble
+```
+
+### Weekly Deep Learning Pipeline
+```bash
+# Enable deep learning in weekly pipeline
+export ENABLE_ML=true
+export ENABLE_DL=true
+python master_control.py --weekly
+```
+
+### Using Deep Learning Predictions
+
+#### Standalone LSTM Predictions
+```bash
+# Run LSTM predictions only
+python master_control.py --analyze lstm
+
+# View prediction results
+```sql
+SELECT symbol, lstm_prediction_1m, lstm_prediction_3m, lstm_confidence
+FROM ml_predictions
+WHERE model_type = 'LSTM'
+ORDER BY lstm_prediction_1m DESC
+LIMIT 20;
+```
+
+#### Ensemble Predictions (Recommended)
+```bash
+# Generate ensemble predictions (LSTM + XGBoost)
+python ml_analysis/ensemble_predictor.py
+
+# View ensemble results
+```sql
+SELECT symbol, 
+       ensemble_prediction_1m,
+       lstm_weight * lstm_prediction_1m + xgb_weight * xgb_prediction_1m as weighted_pred
+FROM ml_predictions
+WHERE model_type = 'ENSEMBLE'
+ORDER BY ensemble_prediction_1m DESC
+LIMIT 20;
+```
+
+### Deep Learning Performance Monitoring
+```bash
+# Check model performance metrics
+python ml_analysis/evaluate_models.py
+
+# Compare LSTM vs XGBoost vs Ensemble
+python ml_analysis/model_comparison.py
+```
+
+### Hardware Requirements
+- **GPU**: NVIDIA with 8GB+ VRAM (RTX 3090 recommended)
+- **RAM**: 32GB minimum (64GB recommended)
+- **Storage**: 500GB+ for model checkpoints
+
+### Deep Learning Troubleshooting
+
+#### 1. Out of Memory (OOM) Error
+**Problem**: GPU runs out of memory during training
+**Solution**:
+```python
+# Reduce batch size in lstm_return_predictor.py
+batch_size=32  # Instead of 64
+
+# Or reduce sequence length
+sequence_length=30  # Instead of 60
+```
+
+#### 2. Training Takes Too Long
+**Problem**: LSTM training exceeds timeout
+**Solution**:
+```bash
+# Train with fewer epochs
+export LSTM_EPOCHS=50  # Instead of 100
+
+# Or use CPU for testing (slower but works)
+export CUDA_VISIBLE_DEVICES=-1
+```
+
+#### 3. Model Not Converging
+**Problem**: Loss not decreasing during training
+**Solution**:
+```python
+# Adjust learning rate
+learning_rate=0.0001  # Instead of 0.001
+
+# Or increase dropout
+dropout=0.5  # Instead of 0.3
+```
+
 ## 🔄 Maintenance Schedule
 
 ### Daily (Weekdays)
@@ -379,10 +491,12 @@ WHERE DATE(snapshot_date) = CURRENT_DATE;
 
 ### Monthly
 - [ ] Retrain ML models (set ENABLE_ML=true)
+- [ ] Retrain LSTM deep learning model (set ENABLE_DL=true)
+- [ ] Update ensemble weights based on performance
 - [ ] Run walk-forward optimization
 - [ ] Database vacuum/analyze
 - [ ] Review and archive old data
-- [ ] Update this RUN_GUIDE.md if needed
+- [ ] Update documentation (RUN_GUIDE.md, SYSTEM_EVALUATION.md, CLAUDE.md)
 
 ### Quarterly
 - [ ] Full system performance review
