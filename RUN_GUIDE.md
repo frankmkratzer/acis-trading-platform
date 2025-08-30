@@ -1,246 +1,445 @@
-# ACIS Trading Platform - Complete Execution Guide
+# ACIS Platform Run Guide
+**Last Updated**: December 2024  
+**Version**: TOP 1% Strategy Implementation v2.0
 
-## Quick Start - Run Everything
+## 🚀 Quick Start
 
+### First Time Setup
 ```bash
-# First time setup - initialize database
-python database/setup_schema_clean.py
-
-# Run complete daily pipeline (fastest, ~30-45 min)
-python main.py --daily
-
-# OR run weekly pipeline with fundamentals (slower, ~2-3 hours)
-python main.py --weekly
-```
-
-## Step-by-Step First Time Setup
-
-### 1. Environment Setup
-```bash
-# Create .env file with your credentials
+# 1. Verify environment variables in .env
 POSTGRES_URL=postgresql://user:pass@host:port/dbname
-ALPHA_VANTAGE_API_KEY=your_premium_key_here
+ALPHA_VANTAGE_API_KEY=your_key_here
+
+# 2. Initialize database
+python master_control.py --setup
+
+# 3. Verify all tables are created
+python master_control.py --verify
+
+# 4. Run initial data population (takes 6-8 hours)
+python master_control.py --weekly
+
+# 5. Check portfolio status
+python master_control.py --status
 ```
 
-### 2. Database Setup
+## 📅 Daily Operations
+
+### Option 1: Full TOP 1% Pipeline (Recommended)
+**Runtime**: 4-5 hours  
+**Best Time**: 5:00 AM - 10:00 AM (before market open)
+
 ```bash
-# Create all 15 essential tables
-python database/setup_schema_clean.py
-
-# Verify tables were created
-python database/verify_tables.py
+python master_control.py --daily
 ```
 
-### 3. Initial Data Population
+**What it does:**
+1. Updates stock prices and S&P 500 benchmark
+2. Fetches insider transactions
+3. Updates institutional holdings
+4. Calculates all fundamental scores (Piotroski, Altman, Beneish)
+5. Updates risk metrics (Sharpe, Sortino, VaR)
+6. Detects technical breakouts
+7. Updates sector rotation matrix
+8. Calculates Kelly Criterion position sizes
+9. Generates master composite scores
+10. Updates portfolio selections
 
-#### Step 1: Fetch Stock Universe (~1-2 hours)
+### Option 2: Basic Daily Pipeline
+**Runtime**: 2 hours  
+**Use When**: Time constrained or API limits reached
+
 ```bash
-# Get all mid/large cap US common stocks ($2B+)
-python data_fetch/market_data/fetch_quality_stocks.py
+python master_control.py --basic-daily
 ```
 
-#### Step 2: Fetch S&P 500 History
+**What it does:**
+1. Updates stock prices only
+2. Recalculates basic metrics
+3. Updates portfolio scores
+
+## 📅 Weekly Operations
+
+### Option 1: Full TOP 1% Weekly Pipeline
+**Runtime**: 6-8 hours  
+**Best Day**: Saturday or Sunday
+
 ```bash
-# Get S&P 500 constituents and historical changes
-python data_fetch/market_data/fetch_sp500_history.py
+python master_control.py --weekly
+
+# With optional features enabled (adds 2-3 hours):
+ENABLE_ML=true ENABLE_OPTIMIZATION=true python master_control.py --weekly
 ```
 
-#### Step 3: Fetch Price Data (~2-3 hours)
+**What it does:**
+1. Everything from daily pipeline PLUS:
+2. Updates complete fundamentals (income, balance, cash flow)
+3. Updates dividend history
+4. Updates earnings estimates
+5. Runs strategy backtests
+6. Performs walk-forward optimization (if enabled)
+7. Calculates performance attribution
+8. Retrains ML models (if enabled)
+
+### Option 2: Basic Weekly Pipeline
+**Runtime**: 3-4 hours
+
 ```bash
-# Get daily OHLCV for all stocks
-python data_fetch/market_data/fetch_prices.py
+python master_control.py --basic-weekly
 ```
 
-#### Step 4: Fetch Fundamentals (optional, ~2-3 hours)
+## 🔍 Monitoring & Analysis
+
+### Check Portfolio Status
 ```bash
-# Get financial statements and metrics
-python data_fetch/fundamentals/fetch_fundamentals.py
-python data_fetch/fundamentals/fetch_company_overview.py
-python data_fetch/fundamentals/calculate_enterprise_value.py
+python master_control.py --status
 ```
 
-### 4. Calculate Rankings & Metrics
-
-#### Option A: Run All Rankings (~30-45 min)
+### Run Specific Analysis
 ```bash
-python rankings/orchestrator.py --phase all
+# Fundamental Scores
+python master_control.py --analyze piotroski    # F-Score calculation
+python master_control.py --analyze altman       # Z-Score calculation
+python master_control.py --analyze beneish      # M-Score calculation
+
+# Smart Money
+python master_control.py --analyze insider      # Insider transactions
+python master_control.py --analyze institutional # Institutional holdings
+
+# Risk & Optimization
+python master_control.py --analyze risk         # Risk metrics
+python master_control.py --analyze kelly        # Position sizing
+python master_control.py --analyze sector       # Sector rotation
+
+# Performance
+python master_control.py --analyze backtest     # Strategy backtesting
+python master_control.py --analyze attribution  # Performance attribution
+python master_control.py --analyze optimize     # Walk-forward optimization
+
+# Machine Learning
+python master_control.py --analyze ml          # ML predictions
 ```
 
-#### Option B: Run Specific Components
+### Database Verification
 ```bash
-# Populate base data (steps 01-09)
-python rankings/orchestrator.py --phase populate
+# Check all tables are present
+python database/verify_tables_enhanced.py
 
-# Calculate rankings (steps 10-17)
-python rankings/orchestrator.py --phase calculate
-
-# Run validation
-python rankings/orchestrator.py --phase validate
+# Basic verification
+python master_control.py --verify
 ```
 
-### 5. Portfolio Analysis
+## 📊 Understanding the Outputs
+
+### Portfolio Files Location
+```
+acis-trading-platform/
+├── logs/                    # Execution logs
+│   ├── daily_pipeline.log
+│   ├── weekly_pipeline.log
+│   └── [script_name].log
+├── outputs/                 # Analysis results (if configured)
+│   ├── portfolios/
+│   ├── backtests/
+│   └── reports/
+```
+
+### Database Tables to Monitor
+
+**Primary Portfolio Tables:**
+- `portfolio_holdings` - Current portfolio positions
+- `portfolio_scores` - Stock scores for each portfolio
+- `portfolio_performance` - Historical performance
+- `master_scores` - Composite scoring for all stocks
+
+**Key Analytics Tables:**
+- `piotroski_scores` - F-Score (8-9 = Strong Buy)
+- `altman_zscores` - Bankruptcy risk (Z > 3 = Safe)
+- `beneish_mscores` - Manipulation risk (M < -2.22 = Clean)
+- `kelly_criterion` - Optimal position sizes
+- `risk_metrics` - Sharpe, Sortino, Beta, VaR
+
+## 🛠️ Troubleshooting
+
+### Common Issues and Solutions
+
+#### 1. Pipeline Timeout
+**Problem**: Script exceeds timeout limit  
+**Solution**: 
 ```bash
-# Calculate portfolio scores for three strategies
-python portfolios/calculate_portfolio_scores.py
+# Use basic mode instead
+python master_control.py --basic-daily
 
-# Generate portfolio holdings
-python portfolios/portfolio_manager.py
+# Or run specific components
+python master_control.py --analyze piotroski
+python master_control.py --analyze risk
 ```
 
-## Daily Operations (After Initial Setup)
-
-### Morning Pipeline (Before Market Open)
+#### 2. API Rate Limit
+**Problem**: Alpha Vantage 600 calls/min exceeded  
+**Solution**: Built-in rate limiter handles this, but if persistent:
 ```bash
-# Quick update - prices and rankings only
-python main.py --daily
+# Reduce batch size in scripts
+# Wait 1 minute between runs
+# Use basic pipeline mode
 ```
 
-This runs:
-1. Updates stock prices for previous trading day
-2. Recalculates technical indicators
-3. Updates breakout signals
-4. Refreshes portfolio scores
-
-### Weekly Pipeline (Weekend)
+#### 3. Missing Tables
+**Problem**: Database tables not found  
+**Solution**:
 ```bash
-# Full update including fundamentals
-python main.py --weekly
+# Recreate all tables
+python master_control.py --setup
+
+# Verify
+python master_control.py --verify
 ```
 
-This runs everything in daily PLUS:
-1. Updates company fundamentals
-2. Recalculates all value metrics
-3. Full ranking recalculation
-4. Portfolio rebalancing check
-
-## Individual Components (As Needed)
-
-### Update Specific Data
+#### 4. Memory Issues
+**Problem**: Out of memory errors  
+**Solution**:
 ```bash
-# Just prices
-python data_fetch/market_data/fetch_prices.py
+# Run components separately
+python analysis/calculate_piotroski_fscore.py
+python analysis/calculate_risk_metrics.py
 
-# Just fundamentals  
-python data_fetch/fundamentals/fetch_fundamentals.py
-
-# Just technical indicators
-python data_fetch/market_data/fetch_technical_indicators.py
+# Reduce batch sizes in scripts
 ```
 
-### Recalculate Specific Metrics
-```bash
-# Excess cash flow
-python rankings/calculate/15_calculate_excess_cash_flow.py
-
-# Dividend sustainability
-python rankings/calculate/16_calculate_dividend_sustainability.py
-
-# Breakout signals
-python strategies/detect_breakouts.py
+#### 5. Import Errors
+**Problem**: Module not found errors  
+**Solution**: Check sys.path.append() in affected script
+```python
+# Should be at top of every script
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
 ```
 
-### Portfolio Operations
-```bash
-# View current portfolios
-python portfolios/view_portfolios.py
+## 📈 Performance Monitoring
 
-# Check for rebalancing needs
-python portfolios/check_rebalance.py
-
-# Export portfolio to CSV
-python portfolios/export_portfolios.py
-```
-
-## Monitoring & Verification
-
-### Check Data Freshness
-```bash
-# See what data needs updating
-python utils/check_data_staleness.py
-```
-
-### Verify Data Quality
-```bash
-# Run data validation
-python rankings/validate/19_comprehensive_validation.py
-```
-
-### Database Health
-```bash
-# Check table sizes and row counts
-python database/verify_tables.py
-```
-
-## Resume After Interruption
-
-All major scripts support resuming:
-```bash
-# Resume daily pipeline
-python main.py --daily --skip-completed
-
-# Resume rankings calculation
-python rankings/orchestrator.py --phase all --skip-completed
-
-# Resume data fetching
-python data_fetch/orchestrator.py --mode daily --skip-completed
-```
-
-## Three-Portfolio Strategy Outputs
-
-After running the complete pipeline, you'll have:
-
-1. **VALUE Portfolio**: Top 10 undervalued quality stocks
-2. **GROWTH Portfolio**: Top 10 consistent outperformers  
-3. **DIVIDEND Portfolio**: Top 10 sustainable dividend growers
-
-Access results:
+### Daily Metrics to Track
 ```sql
--- View portfolio holdings
-SELECT * FROM portfolio_holdings WHERE portfolio_name IN ('VALUE', 'GROWTH', 'DIVIDEND');
+-- Check latest portfolio update
+SELECT portfolio_type, COUNT(*), MAX(last_updated) 
+FROM portfolio_holdings 
+WHERE is_current = true 
+GROUP BY portfolio_type;
 
--- View portfolio scores
-SELECT * FROM portfolio_scores ORDER BY composite_score DESC LIMIT 30;
+-- Top stocks by composite score
+SELECT symbol, composite_score, value_score, growth_score, dividend_score
+FROM master_scores
+ORDER BY composite_score DESC
+LIMIT 10;
+
+-- Check for data freshness
+SELECT MAX(trade_date) FROM stock_prices;
+SELECT MAX(fiscal_date_ending) FROM fundamentals;
 ```
 
-## Performance Expectations
-
-- **Initial full setup**: 4-6 hours (one time)
-- **Daily update**: 30-45 minutes
-- **Weekly update**: 2-3 hours
-- **API rate limit**: 600 calls/minute (Premium Alpha Vantage)
-- **Database size**: ~5-10GB after full population
-
-## Troubleshooting
-
-### If fetching fails:
+### Weekly Performance Review
 ```bash
-# Check API key
-echo $ALPHA_VANTAGE_API_KEY
+# Run attribution analysis
+python master_control.py --analyze attribution
 
-# Test API connection
-python utils/test_alpha_vantage.py
+# Review backtest results
+python master_control.py --analyze backtest
+
+# Check risk metrics
+python master_control.py --analyze risk
 ```
 
-### If rankings timeout:
+## 🤖 Automated Trading with Schwab API
+
+### Initial Setup (One-time)
 ```bash
-# Run in smaller phases
-python rankings/orchestrator.py --phase populate
-python rankings/orchestrator.py --phase calculate --skip-completed
+# 1. Create trading database tables
+python database/setup_trading_tables.py
+
+# 2. Set up environment variables in .env
+SCHWAB_APP_KEY=your_app_key
+SCHWAB_APP_SECRET=your_app_secret
+SCHWAB_REDIRECT_URI=https://localhost:8443/callback
+TRADING_ENCRYPTION_KEY=your_32_byte_key_base64
+
+# 3. Onboard a client (example)
+python trading/client_onboarding.py
+
+# 4. Link Schwab account
+python trading/schwab_account_setup.py --client-id 1
 ```
 
-### If database connection fails:
+### Daily Automated Trading Operations
 ```bash
-# Test connection
-python database/test_connection.py
+# Complete automated trading workflow (runs after market close)
+# 1. Run ACIS analysis (4-5 hours)
+python master_control.py --daily
 
-# Check PostgreSQL is running
-psql -U your_user -d your_db -c "SELECT 1;"
+# 2. Generate trading signals from portfolio recommendations
+python trading/automated_trading_manager.py --generate-signals
+
+# 3. Execute trades for all active accounts (run before market open)
+python trading/automated_trading_manager.py --mode production --process-trades
+
+# 4. Update account balances and holdings
+python trading/update_account_balances.py
+
+# 5. Send daily reports to clients
+python trading/daily_reports.py
 ```
 
-## Important Notes
+### Paper Trading Mode (Testing)
+```bash
+# Test trading logic without real money
+python trading/automated_trading_manager.py --mode paper --process-trades
 
-1. **Market Hours**: Run daily pipeline AFTER market close (4:30 PM ET or later)
-2. **Weekends**: Best time for weekly pipeline with fundamentals
-3. **API Limits**: Premium API allows 600 calls/min, script auto-throttles
-4. **Disk Space**: Ensure 10GB+ free space for database growth
-5. **Memory**: Rankings calculation needs 4-8GB RAM for 15M+ records
+# View paper trading results
+python trading/view_paper_trades.py
+```
+
+### Monitoring Automated Trading
+```sql
+-- Check active trading accounts
+SELECT c.email, ta.automated_trading_active, ta.last_sync_at
+FROM clients c
+JOIN trading_accounts ta ON c.client_id = ta.client_id
+WHERE ta.automated_trading_active = true;
+
+-- View today's executed trades
+SELECT * FROM trade_execution_log
+WHERE DATE(order_placed_at) = CURRENT_DATE
+ORDER BY order_placed_at DESC;
+
+-- Check current holdings across all accounts
+SELECT ta.schwab_account_number, ch.symbol, ch.quantity, ch.market_value
+FROM current_holdings ch
+JOIN trading_accounts ta ON ch.account_id = ta.account_id
+ORDER BY ta.account_id, ch.market_value DESC;
+
+-- Monitor trading signals queue
+SELECT * FROM trading_signals_queue
+WHERE processed = false
+ORDER BY acis_score DESC;
+```
+
+### Trading Safety Checks
+- Maximum 10% per position (configurable per client)
+- Minimum $1,000 cash balance maintained
+- Maximum 20 positions per portfolio
+- Optional trailing stop-losses (15% default)
+- Paper trading mode for testing
+
+### Troubleshooting Trading Issues
+
+#### 1. OAuth Token Expired
+**Problem**: Schwab API returns 401 Unauthorized
+**Solution**: 
+```bash
+# Refresh tokens for all accounts
+python trading/refresh_all_tokens.py
+```
+
+#### 2. Trade Execution Failed
+**Problem**: Order rejected by Schwab
+**Solution**: Check `trade_execution_log` for error messages:
+```sql
+SELECT * FROM trade_execution_log 
+WHERE order_status = 'REJECTED' 
+  AND DATE(created_at) = CURRENT_DATE;
+```
+
+#### 3. Insufficient Funds
+**Problem**: Cannot execute buy orders
+**Solution**: Check account balances and adjust position sizes:
+```sql
+SELECT account_id, cash_balance, min_cash_balance 
+FROM account_balances ab
+JOIN trading_accounts ta ON ab.account_id = ta.account_id
+WHERE DATE(snapshot_date) = CURRENT_DATE;
+```
+
+## 🔄 Maintenance Schedule
+
+### Daily (Weekdays)
+- [ ] Run daily pipeline at 5 AM
+- [ ] Generate trading signals at 10 AM
+- [ ] Execute trades at 9:25 AM (before market open)
+- [ ] Update account balances at 4:30 PM (after market close)
+- [ ] Check logs for errors
+- [ ] Verify portfolio status
+- [ ] Monitor any position alerts
+- [ ] Review executed trades
+
+### Weekly (Weekends)
+- [ ] Run full weekly pipeline
+- [ ] Review backtest performance
+- [ ] Check performance attribution
+- [ ] Review sector rotation recommendations
+- [ ] Clean old log files (>30 days)
+
+### Monthly
+- [ ] Retrain ML models (set ENABLE_ML=true)
+- [ ] Run walk-forward optimization
+- [ ] Database vacuum/analyze
+- [ ] Review and archive old data
+- [ ] Update this RUN_GUIDE.md if needed
+
+### Quarterly
+- [ ] Full system performance review
+- [ ] Strategy parameter tuning
+- [ ] Database optimization
+- [ ] Review API usage and costs
+
+## 🚨 Critical Warnings
+
+1. **NEVER** modify database schema outside of `database/setup_schema.py`
+2. **NEVER** run multiple pipelines simultaneously (database locks)
+3. **ALWAYS** check logs after pipeline runs
+4. **ALWAYS** use DatabaseConnectionManager for DB operations
+5. **ALWAYS** update this guide when changing operational procedures
+
+## 📞 Support & Resources
+
+### Log Files
+- Location: `acis-trading-platform/logs/`
+- Retention: 30 days recommended
+- Format: `[timestamp] [level] [module] message`
+
+### Configuration Files
+- `.env` - Environment variables (API keys, database)
+- `database/setup_schema.py` - Database schema definition
+- `utils/config_manager.py` - System configuration
+
+### Key Scripts to Understand
+1. `master_control.py` - Main control interface
+2. `pipelines/run_daily_pipeline_top1pct.py` - Daily operations
+3. `pipelines/run_weekly_pipeline_top1pct.py` - Weekly operations
+4. `analysis/calculate_master_scores.py` - Scoring system
+5. `database/verify_tables_enhanced.py` - Database verification
+
+## 📝 Change Log
+
+### Version 2.1 (December 2024)
+- Added automated trading system with Schwab API integration
+- Created 7 new database tables for client and trade management
+- Implemented automated_trading_manager.py for trade execution
+- Added paper trading mode for testing
+- Integrated encrypted credential storage
+- Added position sizing and risk management controls
+
+### Version 2.0 (December 2024)
+- Implemented all 15 TOP 1% strategy enhancements
+- Added master_control.py unified interface
+- Created comprehensive pipeline system
+- Added ML predictions and backtesting
+
+### Update Checklist
+When making changes that affect operations:
+- [ ] Update this RUN_GUIDE.md
+- [ ] Update CLAUDE.md if architectural
+- [ ] Test changes in development first
+- [ ] Document in change log above
+- [ ] Notify team of operational changes
+
+---
+**Remember**: This guide is the source of truth for operating the ACIS platform. Keep it updated!

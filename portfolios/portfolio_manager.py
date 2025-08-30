@@ -651,8 +651,10 @@ def main():
         print("  2. Stock prices are missing")
         print("  3. Excess cash flow metrics haven't been calculated")
         print("\nRun the following to populate data:")
-        print("  python main.py fetch --type fundamentals")
-        print("  python main.py fetch --type prices")
+        print("  python master_control.py --daily")
+        print("  # Or for specific data:")
+        print("  python data_fetch/fundamentals/fetch_fundamentals.py")
+        print("  python data_fetch/market_data/fetch_prices.py")
         print("  python analysis/excess_cash_flow.py")
         return 1
     

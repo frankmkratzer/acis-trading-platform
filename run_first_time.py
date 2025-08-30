@@ -122,9 +122,9 @@ def main():
     
     print("""
     Next steps:
-    1. Run daily updates: python main.py --daily
-    2. View portfolios: python portfolios/view_portfolios.py
-    3. Check data: python database/verify_tables.py
+    1. Run daily updates: python master_control.py --daily
+    2. View portfolios: python master_control.py --status
+    3. Check data: python master_control.py --verify
     
     For complete guide, see RUN_GUIDE.md
     """)
